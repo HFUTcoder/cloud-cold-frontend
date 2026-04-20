@@ -1,17 +1,30 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { callAgentStream } from '@/api/agent'
+import {
+  createConversation,
+  deleteConversation,
+  listHistoryByConversation,
+  listMyConversations,
+} from '@/api/chat'
 import { getLoginUser, userLogin, userLogout, userRegister } from '@/api/user'
 import type { AgentCallRequest } from '@/types/agent'
+import type { ChatConversation, ChatMemoryHistory } from '@/types/chat'
 import type { LoginUserVO } from '@/types/user'
 
 type ChatRole = 'user' | 'assistant'
-type AuthModalType = 'none' | 'register' | 'login' | 'logout'
+type AuthModalType = 'none' | 'register' | 'login' | 'logout' | 'deleteConversation'
 
 interface ChatMessage {
   id: number
   role: ChatRole
   content: string
+  thinkingContent?: string
+  finalContent?: string
+  thinkingPreviewText?: string
+  thinkingPreviewSeq?: number
+  thinkingExpanded?: boolean
+  thinkingDone?: boolean
   pending?: boolean
 }
 
@@ -31,6 +44,11 @@ const currentUser = ref<LoginUserVO | null>(null)
 const streamChunkBuffer = ref('')
 const streamRafId = ref<number | null>(null)
 const activeAssistantMessage = ref<ChatMessage | null>(null)
+const streamThinkingBuffer = ref('')
+const streamFinalBuffer = ref('')
+const thinkingPreviewQueue = ref<string[]>([])
+const thinkingPreviewRemainder = ref('')
+const thinkingPreviewTimerId = ref<number | null>(null)
 
 const loginForm = ref({
   userAccount: '',
@@ -44,6 +62,12 @@ const registerForm = ref({
 })
 
 const messages = ref<ChatMessage[]>([])
+const conversations = ref<ChatConversation[]>([])
+const activeConversationId = ref('')
+const conversationLoading = ref(false)
+const historyLoading = ref(false)
+const deletingConversationId = ref('')
+const pendingDeleteConversationId = ref('')
 
 const starterPrompts = [
   '如何利用 AI Agent 优化日常办公自动化流程？',
@@ -64,6 +88,13 @@ const canSubmit = computed(() => inputValue.value.trim().length > 0 && !loading.
 const modeLabel = computed(() => (mode.value === 'fast' ? '快速' : '思考'))
 const isLoggedIn = computed(() => currentUser.value !== null)
 const userLabel = computed(() => currentUser.value?.userName || currentUser.value?.userAccount || '')
+const activeConversationTitle = computed(() => {
+  if (!activeConversationId.value) {
+    return '新对话'
+  }
+  const active = conversations.value.find((item) => item.conversationId === activeConversationId.value)
+  return active?.title || '新对话'
+})
 
 function scrollToBottom() {
   nextTick(() => {
@@ -86,17 +117,81 @@ function appendMessage(role: ChatRole, content: string, pending = false): ChatMe
   return message
 }
 
+function appendAssistantMessage(): ChatMessage {
+  const message: ChatMessage = {
+    id: ++messageId.value,
+    role: 'assistant',
+    content: '',
+    thinkingContent: '',
+    finalContent: '',
+    thinkingPreviewText: '',
+    thinkingPreviewSeq: 0,
+    thinkingExpanded: false,
+    thinkingDone: false,
+    pending: true,
+  }
+  messages.value.push(message)
+  scrollToBottom()
+  return message
+}
+
+function normalizeMessageType(type: string | undefined): string {
+  return (type || '').toUpperCase()
+}
+
+function mapHistoryToMessages(historyList: ChatMemoryHistory[]): ChatMessage[] {
+  const result: ChatMessage[] = []
+  for (const item of historyList) {
+    const type = normalizeMessageType(item.messageType)
+    if (type === 'USER') {
+      result.push({
+        id: ++messageId.value,
+        role: 'user',
+        content: item.content || '',
+      })
+      continue
+    }
+    if (type === 'ASSISTANT') {
+      result.push({
+        id: ++messageId.value,
+        role: 'assistant',
+        content: '',
+        thinkingContent: '',
+        finalContent: item.content || '',
+        thinkingPreviewText: '',
+        thinkingPreviewSeq: 0,
+        thinkingExpanded: false,
+        thinkingDone: true,
+      })
+    }
+  }
+  return result
+}
+
 function fillPrompt(prompt: string) {
   inputValue.value = prompt
 }
 
-function startNewChat() {
+async function startNewChat() {
   controller.value?.abort()
   resetStreamState()
   controller.value = null
   loading.value = false
   inputValue.value = ''
   messages.value = []
+
+  if (!isLoggedIn.value) {
+    activeConversationId.value = ''
+    return
+  }
+
+  try {
+    const conversationId = await createConversation()
+    activeConversationId.value = conversationId
+    await loadConversations(false)
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '新建会话失败，请稍后再试。'
+  }
 }
 
 function toggleModeMenu() {
@@ -167,6 +262,7 @@ async function submitLogin() {
     })
     currentUser.value = data
     authModal.value = 'none'
+    await loadConversations(false)
   } catch (error) {
     authError.value = error instanceof Error ? error.message : '登录失败，请稍后再试。'
   } finally {
@@ -180,11 +276,99 @@ async function confirmLogout() {
   try {
     await userLogout()
     currentUser.value = null
+    conversations.value = []
+    activeConversationId.value = ''
     authModal.value = 'none'
     startNewChat()
   } catch (error) {
     authError.value = error instanceof Error ? error.message : '注销失败，请稍后再试。'
   } finally {
+    authLoading.value = false
+  }
+}
+
+async function loadConversations(keepCurrentSelection = true) {
+  if (!isLoggedIn.value) {
+    conversations.value = []
+    activeConversationId.value = ''
+    return
+  }
+
+  conversationLoading.value = true
+  try {
+    const list = await listMyConversations()
+    conversations.value = list
+
+    if (keepCurrentSelection && activeConversationId.value) {
+      const exists = list.some((item) => item.conversationId === activeConversationId.value)
+      if (!exists) {
+        activeConversationId.value = ''
+        messages.value = []
+      }
+    }
+  } finally {
+    conversationLoading.value = false
+  }
+}
+
+async function loadConversationHistory(conversationId: string) {
+  if (!conversationId) {
+    messages.value = []
+    return
+  }
+
+  historyLoading.value = true
+  try {
+    const history = await listHistoryByConversation(conversationId)
+    messages.value = mapHistoryToMessages(history)
+    scrollToBottom()
+  } catch (error) {
+    messages.value = []
+    authError.value = error instanceof Error ? error.message : '加载历史失败，请稍后再试。'
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function switchConversation(conversationId: string) {
+  if (!conversationId || conversationId === activeConversationId.value) {
+    return
+  }
+  activeConversationId.value = conversationId
+  await loadConversationHistory(conversationId)
+}
+
+async function removeConversation(conversationId: string) {
+  if (!conversationId || deletingConversationId.value) {
+    return
+  }
+  pendingDeleteConversationId.value = conversationId
+  openAuthModal('deleteConversation')
+}
+
+async function confirmDeleteConversation() {
+  if (!pendingDeleteConversationId.value || deletingConversationId.value) {
+    return
+  }
+
+  deletingConversationId.value = pendingDeleteConversationId.value
+  authLoading.value = true
+  authError.value = ''
+  try {
+    await deleteConversation({ conversationId: pendingDeleteConversationId.value })
+    conversations.value = conversations.value.filter(
+      (item) => item.conversationId !== pendingDeleteConversationId.value,
+    )
+    if (activeConversationId.value === pendingDeleteConversationId.value) {
+      activeConversationId.value = ''
+      messages.value = []
+    }
+    pendingDeleteConversationId.value = ''
+    authModal.value = 'none'
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '删除会话失败，请稍后再试。'
+  } finally {
+    deletingConversationId.value = ''
     authLoading.value = false
   }
 }
@@ -200,16 +384,29 @@ async function submitQuestion() {
     return
   }
 
+  if (!activeConversationId.value) {
+    try {
+      activeConversationId.value = await createConversation()
+      await loadConversations(false)
+    } catch (error) {
+      authError.value = error instanceof Error ? error.message : '创建会话失败，请稍后再试。'
+      return
+    }
+  }
+
   inputValue.value = ''
   appendMessage('user', question)
 
-  const assistantMessage = appendMessage('assistant', '', true)
+  const assistantMessage = appendAssistantMessage()
   activeAssistantMessage.value = assistantMessage
   streamChunkBuffer.value = ''
+  streamThinkingBuffer.value = ''
+  streamFinalBuffer.value = ''
 
   const payload: AgentCallRequest = {
     question,
     mode: mode.value,
+    conversationId: activeConversationId.value,
   }
 
   loading.value = true
@@ -224,10 +421,10 @@ async function submitQuestion() {
         },
         onError(errorText) {
           const content = `[错误] ${errorText}`
-          if (!assistantMessage.content && !streamChunkBuffer.value) {
-            pushStreamChunk(content)
+          if (!assistantMessage.finalContent && !streamFinalBuffer.value) {
+            pushFinalChunk(content)
           } else {
-            pushStreamChunk(`\n\n${content}`)
+            pushFinalChunk(`\n\n${content}`)
           }
         },
       },
@@ -235,22 +432,25 @@ async function submitQuestion() {
     )
 
     await waitForStreamDrain()
-    if (!assistantMessage.content.trim() && !streamChunkBuffer.value.trim()) {
-      assistantMessage.content = '已完成本次回答。'
+    assistantMessage.thinkingDone = true
+    if (!assistantMessage.finalContent?.trim() && !assistantMessage.thinkingContent?.trim()) {
+      assistantMessage.finalContent = '已完成本次回答。'
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : '请求失败，请稍后再试。'
-    if (!assistantMessage.content) {
-      pushStreamChunk(errorMessage)
+    if (!assistantMessage.finalContent) {
+      pushFinalChunk(errorMessage)
     } else {
-      pushStreamChunk(`\n\n${errorMessage}`)
+      pushFinalChunk(`\n\n${errorMessage}`)
     }
     await waitForStreamDrain()
+    assistantMessage.thinkingDone = true
   } finally {
     assistantMessage.pending = false
     loading.value = false
     controller.value = null
     activeAssistantMessage.value = null
+    void loadConversations(false)
   }
 }
 
@@ -283,14 +483,22 @@ function handleGlobalClick(event: MouseEvent) {
 
 function runStreamFrame() {
   const target = activeAssistantMessage.value
-  if (!target || streamChunkBuffer.value.length === 0) {
+  if (!target || (streamThinkingBuffer.value.length === 0 && streamFinalBuffer.value.length === 0)) {
     streamRafId.value = null
     return
   }
 
-  const batchSize = Math.max(1, Math.min(4, Math.ceil(streamChunkBuffer.value.length / 24)))
-  target.content += streamChunkBuffer.value.slice(0, batchSize)
-  streamChunkBuffer.value = streamChunkBuffer.value.slice(batchSize)
+  if (streamThinkingBuffer.value.length > 0) {
+    const batchSize = Math.max(1, Math.min(4, Math.ceil(streamThinkingBuffer.value.length / 24)))
+    target.thinkingContent = (target.thinkingContent || '') + streamThinkingBuffer.value.slice(0, batchSize)
+    streamThinkingBuffer.value = streamThinkingBuffer.value.slice(batchSize)
+  } else {
+    const batchSize = Math.max(1, Math.min(4, Math.ceil(streamFinalBuffer.value.length / 24)))
+    target.finalContent = (target.finalContent || '') + streamFinalBuffer.value.slice(0, batchSize)
+    streamFinalBuffer.value = streamFinalBuffer.value.slice(batchSize)
+    target.thinkingDone = true
+  }
+
   scrollToBottom()
   streamRafId.value = window.requestAnimationFrame(runStreamFrame)
 }
@@ -300,17 +508,42 @@ function pushStreamChunk(chunk: string) {
     return
   }
 
-  streamChunkBuffer.value += chunk
-
   const target = activeAssistantMessage.value
-  if (target && !target.content && streamChunkBuffer.value.length > 0) {
-    target.content += streamChunkBuffer.value.slice(0, 1)
-    streamChunkBuffer.value = streamChunkBuffer.value.slice(1)
+  if (chunk.includes('[思考过程]')) {
+    const thinkingText = formatThinkingChunk(chunk)
+    if (thinkingText) {
+      streamThinkingBuffer.value += thinkingText
+      if (target) {
+        ingestThinkingPreview(target, thinkingText)
+      }
+    }
+  } else {
+    pushFinalChunk(chunk)
+  }
+
+  if (target && !target.thinkingContent && streamThinkingBuffer.value.length > 0) {
+    target.thinkingContent = streamThinkingBuffer.value.slice(0, 1)
+    streamThinkingBuffer.value = streamThinkingBuffer.value.slice(1)
     scrollToBottom()
   }
 
   if (streamRafId.value === null) {
     streamRafId.value = window.requestAnimationFrame(runStreamFrame)
+  }
+}
+
+function pushFinalChunk(chunk: string) {
+  if (!chunk) {
+    return
+  }
+  const target = activeAssistantMessage.value
+  streamFinalBuffer.value += chunk
+
+  if (target && !target.finalContent && streamFinalBuffer.value.length > 0) {
+    target.finalContent = streamFinalBuffer.value.slice(0, 1)
+    streamFinalBuffer.value = streamFinalBuffer.value.slice(1)
+    target.thinkingDone = true
+    scrollToBottom()
   }
 }
 
@@ -337,8 +570,17 @@ function sanitizeThinkingChunk(chunk: string): string {
   return sanitized
 }
 
+function formatThinkingChunk(chunk: string): string {
+  const stripped = chunk
+    .replace(/^\[思考过程\](?:\[[^\]]+])?\s*/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+
+  return stripped ? `${stripped}\n\n` : ''
+}
+
 async function waitForStreamDrain() {
-  while (streamChunkBuffer.value.length > 0 || streamRafId.value !== null) {
+  while (streamThinkingBuffer.value.length > 0 || streamFinalBuffer.value.length > 0 || streamRafId.value !== null) {
     await new Promise((resolve) => setTimeout(resolve, 16))
   }
 }
@@ -348,15 +590,77 @@ function resetStreamState() {
     window.cancelAnimationFrame(streamRafId.value)
     streamRafId.value = null
   }
+  if (thinkingPreviewTimerId.value !== null) {
+    window.clearTimeout(thinkingPreviewTimerId.value)
+    thinkingPreviewTimerId.value = null
+  }
   streamChunkBuffer.value = ''
+  streamThinkingBuffer.value = ''
+  streamFinalBuffer.value = ''
+  thinkingPreviewQueue.value = []
+  thinkingPreviewRemainder.value = ''
   activeAssistantMessage.value = null
+}
+
+function toggleThinking(message: ChatMessage) {
+  message.thinkingExpanded = !message.thinkingExpanded
+}
+
+function thinkingPreview(message: ChatMessage): string {
+  if (!message.thinkingPreviewText) {
+    return ''
+  }
+  return message.thinkingPreviewText
+}
+
+function ingestThinkingPreview(message: ChatMessage, thinkingText: string) {
+  const normalized = thinkingText.replace(/\r/g, '')
+  if (!normalized.trim()) {
+    return
+  }
+
+  thinkingPreviewRemainder.value += normalized
+  const tokens = thinkingPreviewRemainder.value.split(/[。！？；、\n]+/)
+  thinkingPreviewRemainder.value = tokens.pop() ?? ''
+
+  for (const token of tokens) {
+    const sentence = token.replace(/\s+/g, ' ').trim()
+    if (sentence) {
+      thinkingPreviewQueue.value.push(sentence)
+    }
+  }
+
+  if (thinkingPreviewTimerId.value === null) {
+    showNextThinkingPreview(message)
+  }
+}
+
+function showNextThinkingPreview(message: ChatMessage) {
+  const nextSentence = thinkingPreviewQueue.value.shift()
+  if (!nextSentence) {
+    thinkingPreviewTimerId.value = null
+    return
+  }
+
+  message.thinkingPreviewText = nextSentence
+  message.thinkingPreviewSeq = (message.thinkingPreviewSeq || 0) + 1
+  thinkingPreviewTimerId.value = window.setTimeout(() => {
+    if (message.thinkingDone) {
+      thinkingPreviewTimerId.value = null
+      return
+    }
+    showNextThinkingPreview(message)
+  }, 420)
 }
 
 async function fetchCurrentUser() {
   try {
     currentUser.value = await getLoginUser()
+    await loadConversations(false)
   } catch {
     currentUser.value = null
+    conversations.value = []
+    activeConversationId.value = ''
   }
 }
 
@@ -393,15 +697,27 @@ onBeforeUnmount(() => {
       <button class="new-chat-btn" type="button" @click="startNewChat">+ 新建会话</button>
 
       <div class="nav-group">
-        <p class="nav-title">推荐提问</p>
+        <p class="nav-title">会话列表</p>
+        <div v-if="!isLoggedIn" class="conversation-empty">登录后可查看会话</div>
+        <div v-else-if="conversationLoading" class="conversation-empty">会话加载中...</div>
+        <div v-else-if="conversations.length === 0" class="conversation-empty">暂无会话</div>
         <button
-          v-for="prompt in starterPrompts.slice(0, 3)"
-          :key="prompt"
-          class="quick-prompt-btn"
+          v-for="conversation in conversations"
+          :key="conversation.conversationId"
+          class="conversation-item"
+          :class="{ active: activeConversationId === conversation.conversationId }"
           type="button"
-          @click="fillPrompt(prompt)"
+          @click="switchConversation(conversation.conversationId)"
         >
-          {{ prompt }}
+          <span class="conversation-title">{{ conversation.title || '新会话' }}</span>
+          <span
+            class="conversation-delete"
+            role="button"
+            tabindex="0"
+            @click.stop="removeConversation(conversation.conversationId)"
+          >
+            {{ deletingConversationId === conversation.conversationId ? '...' : '×' }}
+          </span>
         </button>
       </div>
     </aside>
@@ -412,7 +728,7 @@ onBeforeUnmount(() => {
           <span class="bars"></span>
         </button>
         <div class="top-center">
-          <h1>新对话</h1>
+          <h1>{{ activeConversationTitle }}</h1>
           <p>内容由 AI 生成，请仔细甄别</p>
         </div>
         <div class="top-right-actions">
@@ -428,6 +744,7 @@ onBeforeUnmount(() => {
 
       <section ref="chatRef" class="chat-panel" :class="{ empty: !hasMessages }">
         <div class="chat-content">
+          <div v-if="historyLoading" class="history-loading">正在加载会话历史...</div>
           <template v-if="hasMessages">
             <article
               v-for="message in messages"
@@ -437,7 +754,29 @@ onBeforeUnmount(() => {
             >
               <div class="message-bubble">
                 <p class="role-tag">{{ message.role === 'user' ? '你' : '助手' }}</p>
-                <p class="message-content">{{ message.content }}</p>
+                <template v-if="message.role === 'assistant'">
+                  <div v-if="message.thinkingContent" class="thinking-box">
+                    <button class="thinking-header" type="button" @click="toggleThinking(message)">
+                      <span class="thinking-title">{{ message.thinkingDone ? '已完成思考' : '思考中...' }}</span>
+                      <span
+                        v-if="!message.thinkingExpanded && !message.thinkingDone"
+                        class="thinking-preview-wrap"
+                      >
+                        <span :key="message.thinkingPreviewSeq" class="thinking-preview-track">
+                          {{ thinkingPreview(message) }}
+                        </span>
+                      </span>
+                      <span class="thinking-arrow" :class="{ expanded: message.thinkingExpanded }">›</span>
+                    </button>
+                    <div v-if="message.thinkingExpanded" class="thinking-body">
+                      {{ message.thinkingContent }}
+                    </div>
+                  </div>
+                  <p v-if="message.finalContent" class="message-content">{{ message.finalContent }}</p>
+                </template>
+                <template v-else>
+                  <p class="message-content">{{ message.content }}</p>
+                </template>
                 <p v-if="message.pending" class="typing">正在生成...</p>
               </div>
             </article>
@@ -562,7 +901,7 @@ onBeforeUnmount(() => {
           </div>
         </template>
 
-        <template v-else>
+        <template v-else-if="authModal === 'logout'">
           <h3>退出登录</h3>
           <p class="logout-desc">确定退出登录？</p>
           <p v-if="authError" class="error-tip">{{ authError }}</p>
@@ -570,6 +909,18 @@ onBeforeUnmount(() => {
             <button class="text-btn" type="button" @click="closeAuthModal">取消</button>
             <button class="solid-btn" type="button" :disabled="authLoading" @click="confirmLogout">
               {{ authLoading ? '处理中...' : '确认退出' }}
+            </button>
+          </div>
+        </template>
+
+        <template v-else>
+          <h3>删除会话</h3>
+          <p class="logout-desc">确定删除该会话？删除后将无法恢复。</p>
+          <p v-if="authError" class="error-tip">{{ authError }}</p>
+          <div class="modal-actions">
+            <button class="text-btn" type="button" @click="closeAuthModal">取消</button>
+            <button class="solid-btn" type="button" :disabled="authLoading" @click="confirmDeleteConversation">
+              {{ authLoading ? '处理中...' : '确认删除' }}
             </button>
           </div>
         </template>
@@ -679,6 +1030,49 @@ onBeforeUnmount(() => {
   padding: 0.65rem 0.68rem;
   font-size: 0.83rem;
   line-height: 1.35;
+}
+
+.conversation-empty {
+  color: #8d8d95;
+  font-size: 0.8rem;
+  padding: 0.35rem 0.3rem;
+}
+
+.conversation-item {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: #222;
+  border-radius: 0.75rem;
+  padding: 0.52rem 0.6rem;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  cursor: pointer;
+}
+
+.conversation-item.active {
+  border-color: #111;
+}
+
+.conversation-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-delete {
+  color: #8b8b92;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.conversation-delete:hover {
+  color: #2f2f33;
 }
 
 .chat-main {
@@ -820,6 +1214,12 @@ onBeforeUnmount(() => {
   margin: 0 auto;
 }
 
+.history-loading {
+  color: #8e8e96;
+  font-size: 0.85rem;
+  margin-bottom: 0.8rem;
+}
+
 .empty-state {
   max-width: 100%;
   width: 100%;
@@ -872,6 +1272,11 @@ onBeforeUnmount(() => {
   background: #fff;
 }
 
+.message-row.assistant .message-bubble {
+  width: 100%;
+  max-width: 100%;
+}
+
 .message-row.user .message-bubble {
   background: #f7f7f8;
   border-color: #d8d8dc;
@@ -888,6 +1293,86 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
   line-height: 1.6;
   font-size: 0.95rem;
+}
+
+.thinking-box {
+  border: 1px solid #e1e1e6;
+  border-radius: 0.75rem;
+  background: #fafafc;
+  margin-bottom: 0.62rem;
+  overflow: hidden;
+}
+
+.thinking-header {
+  width: 100%;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.52rem 0.68rem;
+  color: #4b5563;
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+
+.thinking-title {
+  flex: 0 0 auto;
+}
+
+.thinking-preview-wrap {
+  display: block;
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  height: 1.25rem;
+  color: #6b7280;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 14%, black 86%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, black 14%, black 86%, transparent 100%);
+}
+
+.thinking-preview-track {
+  display: block;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  line-height: 1.25rem;
+  animation: thinking-vertical-once 0.32s ease-out;
+}
+
+.thinking-arrow {
+  flex: 0 0 auto;
+  font-size: 1rem;
+  color: #7b7f89;
+  transform: rotate(90deg);
+  transition: transform 0.2s ease;
+}
+
+.thinking-arrow.expanded {
+  transform: rotate(-90deg);
+}
+
+.thinking-body {
+  border-top: 1px solid #ececf0;
+  padding: 0.55rem 0.68rem 0.62rem;
+  white-space: pre-wrap;
+  color: #5f6470;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  max-height: 14rem;
+  overflow: auto;
+}
+
+@keyframes thinking-vertical-once {
+  from {
+    transform: translateY(85%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
 }
 
 .typing {

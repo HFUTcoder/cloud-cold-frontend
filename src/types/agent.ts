@@ -10,6 +10,10 @@ export interface AgentCallRequest {
    * 工作模式
    */
   mode: string
+  /**
+   * 会话 id（可选）
+   */
+  conversationId?: string
 }
 
 export type AgentSseEventName = 'message' | 'error' | string
