@@ -3,6 +3,8 @@ export interface ChatConversation {
   userId: number
   conversationId: string
   title: string
+  selectedSkills?: string
+  selectedSkillList?: string[]
   lastActiveTime?: string
   createTime?: string
   updateTime?: string

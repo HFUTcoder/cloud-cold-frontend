@@ -47,6 +47,16 @@ export function deleteConversation(payload: ChatConversationDeleteRequest) {
   })
 }
 
+export function updateConversationSkills(conversationId: string, selectedSkills: string[]) {
+  return request<boolean>('/chatConversation/update/skills', {
+    method: 'POST',
+    body: JSON.stringify({
+      conversationId,
+      selectedSkills,
+    }),
+  })
+}
+
 export function listHistoryByConversation(conversationId: string) {
   return request<ChatMemoryHistory[]>(
     `/chatMemory/history/list/conversation?conversationId=${encodeURIComponent(conversationId)}`,

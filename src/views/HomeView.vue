@@ -6,10 +6,13 @@ import {
   deleteConversation,
   listHistoryByConversation,
   listMyConversations,
+  updateConversationSkills,
 } from '@/api/chat'
+import { listSkills } from '@/api/skill'
 import { getLoginUser, userLogin, userLogout, userRegister } from '@/api/user'
 import type { AgentCallRequest } from '@/types/agent'
 import type { ChatConversation, ChatMemoryHistory } from '@/types/chat'
+import type { SkillMetadataVO } from '@/types/skill'
 import type { LoginUserVO } from '@/types/user'
 
 type ChatRole = 'user' | 'assistant'
@@ -30,6 +33,7 @@ interface ChatMessage {
 
 const chatRef = ref<HTMLElement | null>(null)
 const modeMenuRef = ref<HTMLElement | null>(null)
+const skillMenuRef = ref<HTMLElement | null>(null)
 const inputValue = ref('')
 const mode = ref<'fast' | 'thinking'>('fast')
 const showModeMenu = ref(false)
@@ -68,6 +72,12 @@ const conversationLoading = ref(false)
 const historyLoading = ref(false)
 const deletingConversationId = ref('')
 const pendingDeleteConversationId = ref('')
+const showSkillMenu = ref(false)
+const skillListLoading = ref(false)
+const skillBindingLoading = ref(false)
+const skills = ref<SkillMetadataVO[]>([])
+const hoveredSkillName = ref('')
+const selectedSkillName = ref('')
 
 const starterPrompts = [
   '如何利用 AI Agent 优化日常办公自动化流程？',
@@ -95,6 +105,30 @@ const activeConversationTitle = computed(() => {
   const active = conversations.value.find((item) => item.conversationId === activeConversationId.value)
   return active?.title || '新对话'
 })
+const hoveredSkill = computed(() => {
+  const name = hoveredSkillName.value || selectedSkillName.value
+  return skills.value.find((item) => item.name === name)
+})
+
+function resolveSelectedSkills(conversation: ChatConversation | undefined): string[] {
+  if (!conversation) {
+    return []
+  }
+  if (Array.isArray(conversation.selectedSkillList) && conversation.selectedSkillList.length > 0) {
+    return conversation.selectedSkillList
+  }
+  if (conversation.selectedSkills) {
+    try {
+      const parsed = JSON.parse(conversation.selectedSkills)
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item)).filter(Boolean)
+      }
+    } catch {
+      return []
+    }
+  }
+  return []
+}
 
 function scrollToBottom() {
   nextTick(() => {
@@ -189,18 +223,97 @@ async function startNewChat() {
     const conversationId = await createConversation()
     activeConversationId.value = conversationId
     await loadConversations(false)
+    selectedSkillName.value = ''
   } catch (error) {
     authError.value = error instanceof Error ? error.message : '新建会话失败，请稍后再试。'
   }
 }
 
 function toggleModeMenu() {
+  showSkillMenu.value = false
   showModeMenu.value = !showModeMenu.value
+}
+
+async function toggleSkillMenu() {
+  showModeMenu.value = false
+  showSkillMenu.value = !showSkillMenu.value
+  if (!showSkillMenu.value) {
+    return
+  }
+  await loadSkills()
+  hoveredSkillName.value = selectedSkillName.value
 }
 
 function chooseMode(nextMode: 'fast' | 'thinking') {
   mode.value = nextMode
   showModeMenu.value = false
+}
+
+async function loadSkills() {
+  if (skills.value.length > 0) {
+    return
+  }
+  skillListLoading.value = true
+  try {
+    skills.value = await listSkills()
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '加载 skill 列表失败，请稍后再试。'
+  } finally {
+    skillListLoading.value = false
+  }
+}
+
+async function bindSkill(skillName: string) {
+  if (!isLoggedIn.value) {
+    openAuthModal('login')
+    return
+  }
+  if (!activeConversationId.value) {
+    authError.value = '请先新建会话或发送消息后再绑定 skill。'
+    return
+  }
+  if (skillBindingLoading.value) {
+    return
+  }
+
+  skillBindingLoading.value = true
+  authError.value = ''
+  try {
+    await updateConversationSkills(activeConversationId.value, [skillName])
+    selectedSkillName.value = skillName
+    conversations.value = conversations.value.map((item) =>
+      item.conversationId === activeConversationId.value
+        ? { ...item, selectedSkillList: [skillName] }
+        : item,
+    )
+    showSkillMenu.value = false
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '绑定 skill 失败，请稍后再试。'
+  } finally {
+    skillBindingLoading.value = false
+  }
+}
+
+async function unbindSkill() {
+  if (!activeConversationId.value || skillBindingLoading.value) {
+    return
+  }
+  skillBindingLoading.value = true
+  authError.value = ''
+  try {
+    await updateConversationSkills(activeConversationId.value, [])
+    selectedSkillName.value = ''
+    conversations.value = conversations.value.map((item) =>
+      item.conversationId === activeConversationId.value
+        ? { ...item, selectedSkillList: [] }
+        : item,
+    )
+    showSkillMenu.value = false
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '解除 skill 绑定失败，请稍后再试。'
+  } finally {
+    skillBindingLoading.value = false
+  }
 }
 
 function openAuthModal(type: AuthModalType) {
@@ -278,6 +391,7 @@ async function confirmLogout() {
     currentUser.value = null
     conversations.value = []
     activeConversationId.value = ''
+    selectedSkillName.value = ''
     authModal.value = 'none'
     startNewChat()
   } catch (error) {
@@ -291,6 +405,7 @@ async function loadConversations(keepCurrentSelection = true) {
   if (!isLoggedIn.value) {
     conversations.value = []
     activeConversationId.value = ''
+    selectedSkillName.value = ''
     return
   }
 
@@ -299,12 +414,18 @@ async function loadConversations(keepCurrentSelection = true) {
     const list = await listMyConversations()
     conversations.value = list
 
-    if (keepCurrentSelection && activeConversationId.value) {
+    if (activeConversationId.value) {
       const exists = list.some((item) => item.conversationId === activeConversationId.value)
       if (!exists) {
         activeConversationId.value = ''
         messages.value = []
+        selectedSkillName.value = ''
+      } else {
+        const active = list.find((item) => item.conversationId === activeConversationId.value)
+        selectedSkillName.value = resolveSelectedSkills(active)[0] || ''
       }
+    } else if (!keepCurrentSelection) {
+      selectedSkillName.value = ''
     }
   } finally {
     conversationLoading.value = false
@@ -335,6 +456,8 @@ async function switchConversation(conversationId: string) {
     return
   }
   activeConversationId.value = conversationId
+  const active = conversations.value.find((item) => item.conversationId === conversationId)
+  selectedSkillName.value = resolveSelectedSkills(active)[0] || ''
   await loadConversationHistory(conversationId)
 }
 
@@ -362,6 +485,7 @@ async function confirmDeleteConversation() {
     if (activeConversationId.value === pendingDeleteConversationId.value) {
       activeConversationId.value = ''
       messages.value = []
+      selectedSkillName.value = ''
     }
     pendingDeleteConversationId.value = ''
     authModal.value = 'none'
@@ -472,12 +596,14 @@ function handleEnter(event: KeyboardEvent) {
 }
 
 function handleGlobalClick(event: MouseEvent) {
-  if (!showModeMenu.value || !modeMenuRef.value) {
-    return
-  }
   const target = event.target as Node | null
-  if (target && !modeMenuRef.value.contains(target)) {
+
+  if (showModeMenu.value && modeMenuRef.value && target && !modeMenuRef.value.contains(target)) {
     showModeMenu.value = false
+  }
+
+  if (showSkillMenu.value && skillMenuRef.value && target && !skillMenuRef.value.contains(target)) {
+    showSkillMenu.value = false
   }
 }
 
@@ -661,6 +787,7 @@ async function fetchCurrentUser() {
     currentUser.value = null
     conversations.value = []
     activeConversationId.value = ''
+    selectedSkillName.value = ''
   }
 }
 
@@ -803,6 +930,9 @@ onBeforeUnmount(() => {
 
       <footer class="composer-wrap">
         <div class="composer">
+          <div v-if="selectedSkillName" class="selected-skill-chip">
+            已绑定 Skill：{{ selectedSkillName }}
+          </div>
           <textarea
             v-model="inputValue"
             class="composer-input"
@@ -831,6 +961,43 @@ onBeforeUnmount(() => {
                     <div class="mode-item-main">{{ item.label }}</div>
                     <div class="mode-item-desc">{{ item.desc }}</div>
                   </button>
+                </div>
+              </div>
+
+              <div ref="skillMenuRef" class="skill-picker">
+                <button class="mode-trigger skill-trigger" type="button" @click.stop="toggleSkillMenu">
+                  <span>🧩 Skill</span>
+                  <span class="arrow">›</span>
+                </button>
+
+                <div v-if="showSkillMenu" class="skill-dropdown">
+                  <div class="skill-list">
+                    <button
+                      class="skill-item unbind"
+                      type="button"
+                      :disabled="!selectedSkillName || skillBindingLoading || !activeConversationId"
+                      @click="unbindSkill"
+                    >
+                      {{ skillBindingLoading ? '处理中...' : '解除绑定' }}
+                    </button>
+                    <button
+                      v-for="skill in skills"
+                      :key="skill.name"
+                      type="button"
+                      class="skill-item"
+                      :class="{ active: selectedSkillName === skill.name }"
+                      @mouseenter="hoveredSkillName = skill.name"
+                      @focus="hoveredSkillName = skill.name"
+                      @click="bindSkill(skill.name)"
+                    >
+                      {{ skill.name }}
+                    </button>
+                    <div v-if="skillListLoading" class="skill-hint">加载中...</div>
+                  </div>
+                  <div class="skill-desc">
+                    <p v-if="hoveredSkill">{{ hoveredSkill.description || '暂无描述' }}</p>
+                    <p v-else class="skill-hint">鼠标悬浮查看 Skill 描述</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1387,6 +1554,7 @@ onBeforeUnmount(() => {
 }
 
 .composer {
+  position: relative;
   width: min(920px, calc(100% - 4px));
   margin: 0 auto;
   border: 1px solid #111;
@@ -1394,6 +1562,18 @@ onBeforeUnmount(() => {
   background: #fff;
   box-shadow: 0 3px 18px rgba(0, 0, 0, 0.05);
   padding: 0.66rem 0.78rem 0.58rem;
+}
+
+.selected-skill-chip {
+  position: absolute;
+  top: -1.1rem;
+  left: 0.85rem;
+  border: 1px solid #dcdde4;
+  background: #fff;
+  border-radius: 999px;
+  padding: 0.14rem 0.58rem;
+  font-size: 0.76rem;
+  color: #4b5563;
 }
 
 .composer-input {
@@ -1443,6 +1623,10 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
+.skill-picker {
+  position: relative;
+}
+
 .mode-trigger {
   height: 34px;
   border: none;
@@ -1455,6 +1639,10 @@ onBeforeUnmount(() => {
   padding: 0 0.78rem;
   cursor: pointer;
   font-size: 1rem;
+}
+
+.skill-trigger {
+  min-width: 96px;
 }
 
 .arrow {
@@ -1474,6 +1662,67 @@ onBeforeUnmount(() => {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
   padding: 0.4rem;
   z-index: 20;
+}
+
+.skill-dropdown {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.5rem);
+  width: 420px;
+  border: 1px solid #dddddf;
+  border-radius: 1rem;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+  padding: 0.5rem;
+  z-index: 21;
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 0.45rem;
+}
+
+.skill-list {
+  border-right: 1px solid #ececf2;
+  padding-right: 0.45rem;
+  max-height: 240px;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 0.3rem;
+}
+
+.skill-item {
+  border: 1px solid #ececf2;
+  background: #fff;
+  border-radius: 0.65rem;
+  text-align: left;
+  padding: 0.45rem 0.52rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.skill-item:hover,
+.skill-item.active {
+  border-color: #1f2937;
+}
+
+.skill-item.unbind {
+  color: #9a3a3a;
+}
+
+.skill-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.skill-desc {
+  padding: 0.45rem 0.55rem;
+  color: #5c6472;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.skill-hint {
+  color: #98a0ad;
 }
 
 .mode-item {
@@ -1670,6 +1919,23 @@ onBeforeUnmount(() => {
 
   .composer {
     width: 100%;
+  }
+
+  .skill-dropdown {
+    width: min(92vw, 420px);
+    left: -40px;
+    grid-template-columns: 1fr;
+  }
+
+  .skill-list {
+    border-right: none;
+    border-bottom: 1px solid #ececf2;
+    padding-right: 0;
+    padding-bottom: 0.45rem;
+  }
+
+  .selected-skill-chip {
+    left: 0.45rem;
   }
 
   .auth-btn {
