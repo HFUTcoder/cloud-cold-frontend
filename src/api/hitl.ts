@@ -32,3 +32,7 @@ export function resolveHitlCheckpoint(payload: HitlCheckpointResolveRequest) {
     body: JSON.stringify(payload),
   })
 }
+
+export function getHitlCheckpoint(interruptId: string) {
+  return request<HitlCheckpointVO>(`/hitl/checkpoint/get?interruptId=${encodeURIComponent(interruptId)}`)
+}

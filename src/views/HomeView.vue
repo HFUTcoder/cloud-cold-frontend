@@ -9,7 +9,7 @@ import {
   listMyConversations,
   updateConversationSkills,
 } from '@/api/chat'
-import { resolveHitlCheckpoint } from '@/api/hitl'
+import { getHitlCheckpoint, resolveHitlCheckpoint } from '@/api/hitl'
 import { listSkills } from '@/api/skill'
 import { getLoginUser, userLogin, userLogout, userRegister } from '@/api/user'
 import type {
@@ -43,6 +43,26 @@ interface ChatMessage {
   pending?: boolean
 }
 
+type JsonPrimitive = string | number | boolean | null
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+
+interface HitlArgumentEditor {
+  value: JsonValue | null
+  parseError: string
+}
+
+interface HitlArgumentSpecRecord {
+  type?: string
+  defaultValue?: JsonValue
+}
+
+interface HitlArgumentField {
+  path: string
+  label: string
+  type: 'string' | 'number' | 'boolean' | 'null'
+  value: JsonPrimitive
+}
+
 const chatRef = ref<HTMLElement | null>(null)
 const modeMenuRef = ref<HTMLElement | null>(null)
 const skillMenuRef = ref<HTMLElement | null>(null)
@@ -69,6 +89,7 @@ const currentInterruptId = ref('')
 const showHitlModal = ref(false)
 const hitlToolCalls = ref<PendingToolCall[]>([])
 const hitlFeedbacks = ref<PendingToolCall[]>([])
+const hitlArgumentEditors = ref<Record<string, HitlArgumentEditor>>({})
 const interruptedAssistantMessage = ref<ChatMessage | null>(null)
 
 const loginForm = ref({
@@ -543,8 +564,287 @@ function ensureToolCallArgumentsString(value: string): string {
   return value
 }
 
+function parseToolArguments(value: string): HitlArgumentEditor {
+  const raw = ensureToolCallArgumentsString(value).trim()
+  if (!raw) {
+    return { value: {}, parseError: '' }
+  }
+  try {
+    const parsed = JSON.parse(raw) as JsonValue
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const parsedRecord = parsed as Record<string, JsonValue>
+      const nestedArguments = parsedRecord.arguments
+      if (typeof nestedArguments === 'string') {
+        try {
+          parsedRecord.arguments = JSON.parse(nestedArguments) as JsonValue
+        } catch {
+          // ignore: keep original string when nested JSON parsing fails
+        }
+      }
+      const argumentSpecs = parsedRecord.argumentSpecs
+      if (argumentSpecs && typeof argumentSpecs === 'object' && !Array.isArray(argumentSpecs)) {
+        const specRecord = argumentSpecs as Record<string, HitlArgumentSpecRecord>
+        const currentArguments =
+          parsedRecord.arguments && typeof parsedRecord.arguments === 'object' && !Array.isArray(parsedRecord.arguments)
+            ? { ...(parsedRecord.arguments as Record<string, JsonValue>) }
+            : {}
+        for (const [argumentName, spec] of Object.entries(specRecord)) {
+          if (currentArguments[argumentName] !== undefined) {
+            continue
+          }
+          if (spec && Object.prototype.hasOwnProperty.call(spec, 'defaultValue')) {
+            currentArguments[argumentName] = spec.defaultValue ?? null
+            continue
+          }
+          const typeHint = (spec?.type || '').toLowerCase()
+          if (typeHint === 'number') {
+            currentArguments[argumentName] = 0
+          } else if (typeHint === 'boolean') {
+            currentArguments[argumentName] = false
+          } else {
+            currentArguments[argumentName] = ''
+          }
+        }
+        parsedRecord.arguments = currentArguments
+      }
+    }
+    return { value: parsed, parseError: '' }
+  } catch {
+    return { value: null, parseError: 'arguments 不是合法 JSON，无法结构化展示。' }
+  }
+}
+
+function parsePath(path: string): Array<string | number> {
+  const normalized = path.replace(/\[(\d+)\]/g, '.$1')
+  return normalized
+    .split('.')
+    .filter(Boolean)
+    .map((segment) => (/^\d+$/.test(segment) ? Number(segment) : segment))
+}
+
+function setValueByPath(source: JsonValue, path: string, nextValue: JsonPrimitive): JsonValue {
+  const tokens = parsePath(path)
+  if (tokens.length === 0) {
+    return nextValue
+  }
+
+  const cloned: JsonValue =
+    source === null
+      ? {}
+      : Array.isArray(source)
+        ? [...source]
+        : typeof source === 'object'
+          ? { ...source }
+          : {}
+
+  let cursor: JsonValue = cloned
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const token = tokens[index]
+    const nextToken = tokens[index + 1]
+    const nextContainer: JsonValue = typeof nextToken === 'number' ? [] : {}
+
+    if (Array.isArray(cursor)) {
+      const arrayToken = typeof token === 'number' ? token : Number(token)
+      const current: JsonValue | undefined = cursor[arrayToken]
+      const value: JsonValue =
+        current === null
+          ? nextContainer
+          : Array.isArray(current)
+            ? [...current]
+            : typeof current === 'object'
+              ? { ...current }
+              : nextContainer
+      cursor[arrayToken] = value
+      cursor = value
+      continue
+    }
+
+    if (cursor && typeof cursor === 'object') {
+      const objectToken = String(token)
+      const current: JsonValue | undefined = (cursor as Record<string, JsonValue>)[objectToken]
+      const value: JsonValue =
+        current === null
+          ? nextContainer
+          : Array.isArray(current)
+            ? [...current]
+            : typeof current === 'object'
+              ? { ...current }
+              : nextContainer
+      ;(cursor as Record<string, JsonValue>)[objectToken] = value
+      cursor = value
+    }
+  }
+
+  const lastToken = tokens[tokens.length - 1]
+  if (Array.isArray(cursor)) {
+    const arrayToken = typeof lastToken === 'number' ? lastToken : Number(lastToken)
+    cursor[arrayToken] = nextValue
+  } else if (cursor && typeof cursor === 'object') {
+    ;(cursor as Record<string, JsonValue>)[String(lastToken)] = nextValue
+  }
+  return cloned
+}
+
+function flattenArgumentFields(value: JsonValue, path = '', label = 'arguments'): HitlArgumentField[] {
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return []
+    }
+    return value.flatMap((item, index) => {
+      const nextPath = path ? `${path}[${index}]` : `[${index}]`
+      const nextLabel = `${label}[${index}]`
+      return flattenArgumentFields(item, nextPath, nextLabel)
+    })
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (entries.length === 0) {
+      return []
+    }
+    return entries.flatMap(([key, item]) => {
+      const nextPath = path ? `${path}.${key}` : key
+      const nextLabel = path ? `${label}.${key}` : key
+      return flattenArgumentFields(item, nextPath, nextLabel)
+    })
+  }
+
+  let fieldType: HitlArgumentField['type'] = 'string'
+  if (typeof value === 'number') {
+    fieldType = 'number'
+  } else if (typeof value === 'boolean') {
+    fieldType = 'boolean'
+  } else if (value === null) {
+    fieldType = 'null'
+  }
+  return [{ path, label, type: fieldType, value }]
+}
+
+function isJsonRecord(value: JsonValue): value is { [key: string]: JsonValue } {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function getLockedToolMeta(toolId: string): { skillName: string } {
+  const editor = hitlArgumentEditors.value[toolId]
+  const fallback = { skillName: '' }
+  if (!editor || editor.value === null || !isJsonRecord(editor.value)) {
+    return fallback
+  }
+  const skillName = typeof editor.value.skillName === 'string' ? editor.value.skillName : ''
+  return { skillName }
+}
+
+function getHitlArgumentFields(toolId: string): HitlArgumentField[] {
+  const editor = hitlArgumentEditors.value[toolId]
+  if (!editor || editor.value === null) {
+    return []
+  }
+
+  const allFields = flattenArgumentFields(editor.value)
+  const hasStructuredArguments = allFields.some(
+    (field) => field.path.startsWith('arguments.') || field.path.startsWith('arguments['),
+  )
+
+  if (hasStructuredArguments) {
+    return allFields
+      .filter((field) => field.path.startsWith('arguments.') || field.path.startsWith('arguments['))
+      .map((field) => ({
+        ...field,
+        label: field.label.replace(/^arguments(\.|\[)/, (_value, token: string) => (token === '[' ? '[' : '')),
+      }))
+  }
+
+  return allFields.filter((field) => field.path !== 'skillName' && field.path !== 'scriptPath')
+}
+
+function updateHitlArgumentField(toolId: string, field: HitlArgumentField, rawValue: string | boolean) {
+  const editor = hitlArgumentEditors.value[toolId]
+  if (!editor || editor.value === null) {
+    return
+  }
+
+  let nextValue: JsonPrimitive = rawValue as JsonPrimitive
+  if (field.type === 'number') {
+    const numeric = Number(rawValue)
+    nextValue = Number.isNaN(numeric) ? 0 : numeric
+  } else if (field.type === 'boolean') {
+    nextValue = rawValue === true || rawValue === 'true'
+  } else if (field.type === 'null') {
+    nextValue = rawValue === '' ? null : String(rawValue)
+  } else {
+    nextValue = String(rawValue)
+  }
+
+  hitlArgumentEditors.value = {
+    ...hitlArgumentEditors.value,
+    [toolId]: {
+      ...editor,
+      value: setValueByPath(editor.value, field.path, nextValue),
+    },
+  }
+}
+
+function serializeToolArguments(toolId: string): string {
+  const editor = hitlArgumentEditors.value[toolId]
+  if (!editor) {
+    return '{}'
+  }
+  if (editor.parseError || editor.value === null) {
+    throw new Error('存在无法解析的 arguments，请检查后再提交。')
+  }
+  return JSON.stringify(editor.value)
+}
+
 function updateHitlFeedback(id: string, patch: Partial<PendingToolCall>) {
   hitlFeedbacks.value = hitlFeedbacks.value.map((item) => (item.id === id ? { ...item, ...patch } : item))
+}
+
+function displayHitlDescription(description?: string): string {
+  const text = (description || '').trim()
+  if (!text) {
+    return '待确认工具调用'
+  }
+  if (text.includes('该工具需要用户手动确认。已锁定结构化 toolName 和 arguments。')) {
+    return '请确认后继续执行'
+  }
+  return text
+}
+
+async function openHitlModal(interruptId: string, payload: AgentHitlInterruptPayload, assistantMessage: ChatMessage) {
+  let pendingToolCalls = Array.isArray(payload.pendingToolCalls) ? payload.pendingToolCalls : []
+  if (pendingToolCalls.length === 0 && interruptId) {
+    try {
+      const checkpoint = await getHitlCheckpoint(interruptId)
+      pendingToolCalls = Array.isArray(checkpoint.pendingToolCalls) ? checkpoint.pendingToolCalls : []
+    } catch {
+      // ignore and fallback to empty-state handling below
+    }
+  }
+
+  if (pendingToolCalls.length === 0) {
+    authError.value = '未获取到待确认工具调用，请重新发起问题或重试。'
+    showHitlModal.value = false
+    assistantMessage.pending = false
+    assistantMessage.thinkingDone = true
+    agentRunStatus.value = 'error'
+    return
+  }
+
+  authError.value = ''
+  hitlToolCalls.value = pendingToolCalls
+  hitlFeedbacks.value = pendingToolCalls.map((tool) => ({
+    ...tool,
+    arguments: ensureToolCallArgumentsString(tool.arguments),
+    result: 'APPROVED',
+  }))
+  hitlArgumentEditors.value = Object.fromEntries(
+    hitlFeedbacks.value.map((tool) => [tool.id, parseToolArguments(tool.arguments)]),
+  )
+  interruptedAssistantMessage.value = assistantMessage
+  assistantMessage.pending = false
+  assistantMessage.thinkingDone = false
+  showHitlModal.value = true
+  agentRunStatus.value = 'interrupted'
 }
 
 function handleAgentEvent(event: AgentStreamEvent, assistantMessage: ChatMessage) {
@@ -580,17 +880,7 @@ function handleAgentEvent(event: AgentStreamEvent, assistantMessage: ChatMessage
     case 'hitl_interrupt': {
       const payload = eventData as AgentHitlInterruptPayload
       currentInterruptId.value = event.interruptId || ''
-      hitlToolCalls.value = payload.pendingToolCalls || []
-      hitlFeedbacks.value = (payload.pendingToolCalls || []).map((tool) => ({
-        ...tool,
-        arguments: ensureToolCallArgumentsString(tool.arguments),
-        result: 'APPROVED',
-      }))
-      interruptedAssistantMessage.value = assistantMessage
-      assistantMessage.pending = false
-      assistantMessage.thinkingDone = false
-      showHitlModal.value = true
-      agentRunStatus.value = 'interrupted'
+      void openHitlModal(currentInterruptId.value, payload, assistantMessage)
       break
     }
     case 'error': {
@@ -683,7 +973,7 @@ async function resolveAndResume() {
       feedbacks: hitlFeedbacks.value.map((item) => ({
         id: item.id,
         name: item.name,
-        arguments: ensureToolCallArgumentsString(item.arguments),
+        arguments: serializeToolArguments(item.id),
         result: item.result || 'APPROVED',
         description: item.description || '',
       })),
@@ -717,6 +1007,7 @@ async function resolveAndResume() {
     currentInterruptId.value = ''
     hitlToolCalls.value = []
     hitlFeedbacks.value = []
+    hitlArgumentEditors.value = {}
     activeAssistantMessage.value = null
     controller.value = null
     agentRunStatus.value = 'finished'
@@ -758,6 +1049,7 @@ async function submitQuestion() {
   showHitlModal.value = false
   hitlToolCalls.value = []
   hitlFeedbacks.value = []
+  hitlArgumentEditors.value = {}
   streamThinkingBuffer.value = ''
   streamFinalBuffer.value = ''
 
@@ -1216,8 +1508,10 @@ onBeforeUnmount(() => {
         <p class="logout-desc">请确认以下工具调用，再继续 Agent 执行。</p>
         <div class="hitl-list">
           <div v-for="tool in hitlFeedbacks" :key="tool.id" class="hitl-item">
-            <p class="hitl-name">{{ tool.name }}</p>
-            <p class="hitl-desc">{{ tool.description || '待确认工具调用' }}</p>
+            <p class="hitl-desc">{{ displayHitlDescription(tool.description) }}</p>
+            <div class="hitl-meta" v-if="getLockedToolMeta(tool.id).skillName">
+              <p v-if="getLockedToolMeta(tool.id).skillName">技能：{{ getLockedToolMeta(tool.id).skillName }}</p>
+            </div>
             <label class="field">
               <span>处理结果</span>
               <select
@@ -1228,28 +1522,86 @@ onBeforeUnmount(() => {
                   })
                 "
               >
-                <option value="APPROVED">APPROVED</option>
-                <option value="REJECTED">REJECTED</option>
-                <option value="EDIT">EDIT</option>
+                <option value="APPROVED">同意执行</option>
+                <option value="REJECTED">拒绝执行</option>
+                <option value="EDIT">修改参数后执行</option>
               </select>
             </label>
-            <label class="field">
-              <span>arguments(JSON 字符串)</span>
-              <textarea
-                class="hitl-args"
-                :value="tool.arguments"
-                @input="
-                  updateHitlFeedback(tool.id, {
-                    arguments: ($event.target as HTMLTextAreaElement).value,
-                  })
-                "
-              />
-            </label>
+            <p v-if="hitlArgumentEditors[tool.id]?.parseError" class="error-tip hitl-error-inline">
+              {{ hitlArgumentEditors[tool.id]?.parseError }}
+            </p>
+            <div v-else class="hitl-arg-grid">
+              <template v-if="getHitlArgumentFields(tool.id).length > 0">
+                <label
+                  v-for="field in getHitlArgumentFields(tool.id)"
+                  :key="`${tool.id}-${field.path}`"
+                  class="field hitl-field"
+                >
+                  <span>{{ field.label }}</span>
+                  <template v-if="(tool.result || 'APPROVED') === 'EDIT'">
+                    <input
+                      v-if="field.type === 'string'"
+                      :value="String(field.value ?? '')"
+                      type="text"
+                      @input="
+                        updateHitlArgumentField(
+                          tool.id,
+                          field,
+                          ($event.target as HTMLInputElement).value,
+                        )
+                      "
+                    />
+                    <input
+                      v-else-if="field.type === 'number'"
+                      :value="String(field.value ?? 0)"
+                      type="number"
+                      @input="
+                        updateHitlArgumentField(
+                          tool.id,
+                          field,
+                          ($event.target as HTMLInputElement).value,
+                        )
+                      "
+                    />
+                    <select
+                      v-else-if="field.type === 'boolean'"
+                      :value="String(field.value)"
+                      @change="
+                        updateHitlArgumentField(
+                          tool.id,
+                          field,
+                          ($event.target as HTMLSelectElement).value === 'true',
+                        )
+                      "
+                    >
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
+                    <input
+                      v-else
+                      :value="field.value === null ? '' : String(field.value)"
+                      type="text"
+                      placeholder="留空表示 null"
+                      @input="
+                        updateHitlArgumentField(
+                          tool.id,
+                          field,
+                          ($event.target as HTMLInputElement).value,
+                        )
+                      "
+                    />
+                  </template>
+                  <div v-else class="hitl-readonly-value">
+                    {{ field.value === null ? 'null' : String(field.value) }}
+                  </div>
+                </label>
+              </template>
+              <p v-else class="hitl-empty-args">该工具 arguments 为空对象。</p>
+            </div>
           </div>
         </div>
         <p v-if="authError" class="error-tip">{{ authError }}</p>
         <div class="modal-actions">
-          <button class="text-btn" type="button" @click="showHitlModal = false">稍后处理</button>
           <button class="solid-btn" type="button" :disabled="agentRunStatus === 'resolving'" @click="resolveAndResume">
             {{ agentRunStatus === 'resolving' ? '提交中...' : '提交并继续' }}
           </button>
@@ -2085,6 +2437,47 @@ onBeforeUnmount(() => {
   color: #6a7280;
 }
 
+.hitl-meta {
+  margin: 0 0 0.45rem;
+  display: grid;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+  color: #52525b;
+}
+
+.hitl-arg-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.hitl-field {
+  margin-bottom: 0;
+}
+
+.hitl-error-inline {
+  margin: 0.3rem 0 0.2rem;
+  min-height: auto;
+}
+
+.hitl-empty-args {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+  color: #7a7f8a;
+}
+
+.hitl-readonly-value {
+  border: 1px solid #ececf2;
+  border-radius: 0.72rem;
+  min-height: 36px;
+  padding: 0.52rem 0.7rem;
+  font-size: 0.9rem;
+  color: #3a3a41;
+  background: #f8f8fa;
+  display: flex;
+  align-items: center;
+}
+
 .field {
   display: grid;
   gap: 0.35rem;
@@ -2119,17 +2512,6 @@ onBeforeUnmount(() => {
 
 .field select:focus {
   border-color: #a3a3ad;
-}
-
-.hitl-args {
-  border: 1px solid #dddde3;
-  border-radius: 0.72rem;
-  padding: 0.52rem 0.62rem;
-  font-size: 0.82rem;
-  min-height: 72px;
-  resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
 }
 
 .error-tip {
@@ -2219,6 +2601,10 @@ onBeforeUnmount(() => {
     border-bottom: 1px solid #ececf2;
     padding-right: 0;
     padding-bottom: 0.45rem;
+  }
+
+  .hitl-arg-grid {
+    grid-template-columns: 1fr;
   }
 
   .selected-skill-chip {
