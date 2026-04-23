@@ -1,7 +1,13 @@
-import type { AgentCallRequest, AgentSseEvent, AgentStreamHandlers } from '@/types/agent'
+import type {
+  AgentCallRequest,
+  AgentResumeRequest,
+  AgentStreamEvent,
+  AgentStreamHandlers,
+} from '@/types/agent'
 
-const AGENT_CALL_PATH = '/agent/call'
 const DEFAULT_API_BASE_URL = '/api'
+const AGENT_CALL_PATH = '/agent/call'
+const AGENT_RESUME_PATH = '/agent/resume'
 
 function buildApiUrl(path: string): string {
   const configuredBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() ?? ''
@@ -9,9 +15,9 @@ function buildApiUrl(path: string): string {
   return `${baseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
 }
 
-function parseSseBlock(block: string): AgentSseEvent | null {
+function parseSseBlock(block: string): { event: string; data: string } | null {
   const lines = block.split('\n')
-  let event = 'message'
+  let eventName = ''
   const dataLines: string[] = []
 
   for (const line of lines) {
@@ -19,7 +25,7 @@ function parseSseBlock(block: string): AgentSseEvent | null {
       continue
     }
     if (line.startsWith('event:')) {
-      event = line.slice('event:'.length).trim() || 'message'
+      eventName = line.slice('event:'.length).trim()
       continue
     }
     if (line.startsWith('data:')) {
@@ -27,39 +33,31 @@ function parseSseBlock(block: string): AgentSseEvent | null {
     }
   }
 
-  if (dataLines.length === 0) {
+  if (!eventName || dataLines.length === 0) {
     return null
   }
 
   return {
-    event,
+    event: eventName,
     data: dataLines.join('\n'),
   }
 }
 
-/**
- * 后端 application.yml 配置了 context-path=/api，因此默认请求 /api/agent/call
- */
-export async function callAgentStream(
-  payload: AgentCallRequest,
-  handlers: AgentStreamHandlers = {},
-  signal?: AbortSignal,
-): Promise<void> {
-  const response = await fetch(buildApiUrl(AGENT_CALL_PATH), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    },
-    credentials: 'include',
-    body: JSON.stringify(payload),
-    signal,
-  })
+function safeParseAgentEvent(rawData: string): AgentStreamEvent | null {
+  try {
+    return JSON.parse(rawData) as AgentStreamEvent
+  } catch {
+    return null
+  }
+}
 
+async function consumeAgentSse(
+  response: Response,
+  handlers: AgentStreamHandlers,
+): Promise<void> {
   if (!response.ok) {
     throw new Error(`调用智能体失败: ${response.status} ${response.statusText}`)
   }
-
   if (!response.body) {
     throw new Error('调用智能体失败: 响应流为空')
   }
@@ -85,14 +83,11 @@ export async function callAgentStream(
         const block = buffer.slice(0, boundaryIndex).trim()
         buffer = buffer.slice(boundaryIndex + 2)
 
-        const event = parseSseBlock(block)
-        if (event) {
-          handlers.onEvent?.(event)
-
-          if (event.event === 'message') {
-            handlers.onMessage?.(event.data)
-          } else if (event.event === 'error') {
-            handlers.onError?.(event.data)
+        const parsed = parseSseBlock(block)
+        if (parsed?.event === 'agent') {
+          const payload = safeParseAgentEvent(parsed.data)
+          if (payload) {
+            handlers.onAgentEvent?.(payload)
           }
         }
 
@@ -100,17 +95,53 @@ export async function callAgentStream(
       }
     }
 
-    const tailEvent = parseSseBlock(buffer.trim())
-    if (tailEvent) {
-      handlers.onEvent?.(tailEvent)
-      if (tailEvent.event === 'message') {
-        handlers.onMessage?.(tailEvent.data)
-      } else if (tailEvent.event === 'error') {
-        handlers.onError?.(tailEvent.data)
+    const tail = parseSseBlock(buffer.trim())
+    if (tail?.event === 'agent') {
+      const payload = safeParseAgentEvent(tail.data)
+      if (payload) {
+        handlers.onAgentEvent?.(payload)
       }
     }
   } finally {
     reader.releaseLock()
     handlers.onComplete?.()
   }
+}
+
+export async function callAgentStream(
+  payload: AgentCallRequest,
+  handlers: AgentStreamHandlers = {},
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(buildApiUrl(AGENT_CALL_PATH), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+    signal,
+  })
+
+  await consumeAgentSse(response, handlers)
+}
+
+export async function resumeAgentStream(
+  payload: AgentResumeRequest,
+  handlers: AgentStreamHandlers = {},
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(buildApiUrl(AGENT_RESUME_PATH), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+    signal,
+  })
+
+  await consumeAgentSse(response, handlers)
 }

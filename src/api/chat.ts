@@ -40,6 +40,16 @@ export function listMyConversations() {
   })
 }
 
+export function getConversation(conversationId: string) {
+  return request<ChatConversation>(
+    `/chatConversation/get?conversationId=${encodeURIComponent(conversationId)}`,
+    {
+      method: 'GET',
+      headers: {},
+    },
+  )
+}
+
 export function deleteConversation(payload: ChatConversationDeleteRequest) {
   return request<boolean>('/chatConversation/delete', {
     method: 'POST',

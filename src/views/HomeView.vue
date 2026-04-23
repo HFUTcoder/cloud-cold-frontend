@@ -1,22 +1,34 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { callAgentStream } from '@/api/agent'
+import { callAgentStream, resumeAgentStream } from '@/api/agent'
 import {
   createConversation,
   deleteConversation,
+  getConversation,
   listHistoryByConversation,
   listMyConversations,
   updateConversationSkills,
 } from '@/api/chat'
+import { resolveHitlCheckpoint } from '@/api/hitl'
 import { listSkills } from '@/api/skill'
 import { getLoginUser, userLogin, userLogout, userRegister } from '@/api/user'
-import type { AgentCallRequest } from '@/types/agent'
+import type {
+  AgentCallRequest,
+  AgentErrorPayload,
+  AgentFinalAnswerPayload,
+  AgentHitlInterruptPayload,
+  AgentStreamEvent,
+  AgentThinkingStepPayload,
+  PendingToolCall,
+} from '@/types/agent'
 import type { ChatConversation, ChatMemoryHistory } from '@/types/chat'
+import type { HitlCheckpointResolveRequest } from '@/types/hitl'
 import type { SkillMetadataVO } from '@/types/skill'
 import type { LoginUserVO } from '@/types/user'
 
 type ChatRole = 'user' | 'assistant'
 type AuthModalType = 'none' | 'register' | 'login' | 'logout' | 'deleteConversation'
+type AgentRunStatus = 'idle' | 'calling' | 'interrupted' | 'resolving' | 'resuming' | 'finished' | 'error'
 
 interface ChatMessage {
   id: number
@@ -45,7 +57,6 @@ const authModal = ref<AuthModalType>('none')
 const controller = ref<AbortController | null>(null)
 const messageId = ref(0)
 const currentUser = ref<LoginUserVO | null>(null)
-const streamChunkBuffer = ref('')
 const streamRafId = ref<number | null>(null)
 const activeAssistantMessage = ref<ChatMessage | null>(null)
 const streamThinkingBuffer = ref('')
@@ -53,6 +64,12 @@ const streamFinalBuffer = ref('')
 const thinkingPreviewQueue = ref<string[]>([])
 const thinkingPreviewRemainder = ref('')
 const thinkingPreviewTimerId = ref<number | null>(null)
+const agentRunStatus = ref<AgentRunStatus>('idle')
+const currentInterruptId = ref('')
+const showHitlModal = ref(false)
+const hitlToolCalls = ref<PendingToolCall[]>([])
+const hitlFeedbacks = ref<PendingToolCall[]>([])
+const interruptedAssistantMessage = ref<ChatMessage | null>(null)
 
 const loginForm = ref({
   userAccount: '',
@@ -421,14 +438,30 @@ async function loadConversations(keepCurrentSelection = true) {
         messages.value = []
         selectedSkillName.value = ''
       } else {
-        const active = list.find((item) => item.conversationId === activeConversationId.value)
-        selectedSkillName.value = resolveSelectedSkills(active)[0] || ''
+        await syncActiveConversationDetail(activeConversationId.value)
       }
     } else if (!keepCurrentSelection) {
       selectedSkillName.value = ''
     }
   } finally {
     conversationLoading.value = false
+  }
+}
+
+async function syncActiveConversationDetail(conversationId: string) {
+  if (!conversationId) {
+    selectedSkillName.value = ''
+    return
+  }
+  try {
+    const detail = await getConversation(conversationId)
+    conversations.value = conversations.value.map((item) =>
+      item.conversationId === conversationId ? { ...item, ...detail } : item,
+    )
+    selectedSkillName.value = resolveSelectedSkills(detail)[0] || ''
+  } catch {
+    const active = conversations.value.find((item) => item.conversationId === conversationId)
+    selectedSkillName.value = resolveSelectedSkills(active)[0] || ''
   }
 }
 
@@ -456,8 +489,7 @@ async function switchConversation(conversationId: string) {
     return
   }
   activeConversationId.value = conversationId
-  const active = conversations.value.find((item) => item.conversationId === conversationId)
-  selectedSkillName.value = resolveSelectedSkills(active)[0] || ''
+  await syncActiveConversationDetail(conversationId)
   await loadConversationHistory(conversationId)
 }
 
@@ -497,6 +529,204 @@ async function confirmDeleteConversation() {
   }
 }
 
+function toThinkingText(payload: AgentThinkingStepPayload): string {
+  const stage = payload.stage ? `[${payload.stage}] ` : ''
+  const title = payload.title?.trim() || 'Thinking'
+  const content = payload.content?.trim() || ''
+  return content ? `${stage}${title}\n${content}\n\n` : `${stage}${title}\n\n`
+}
+
+function ensureToolCallArgumentsString(value: string): string {
+  if (!value) {
+    return ''
+  }
+  return value
+}
+
+function updateHitlFeedback(id: string, patch: Partial<PendingToolCall>) {
+  hitlFeedbacks.value = hitlFeedbacks.value.map((item) => (item.id === id ? { ...item, ...patch } : item))
+}
+
+function handleAgentEvent(event: AgentStreamEvent, assistantMessage: ChatMessage) {
+  if (event.conversationId) {
+    activeConversationId.value = event.conversationId
+  }
+
+  const eventData = (event.data || {}) as Record<string, unknown>
+
+  switch (event.type) {
+    case 'thinking_step': {
+      const payload = eventData as AgentThinkingStepPayload
+      const text = toThinkingText(payload)
+      pushThinkingChunk(text)
+      break
+    }
+    case 'assistant_delta': {
+      const content = typeof eventData.content === 'string' ? eventData.content : ''
+      if (content) {
+        pushFinalChunk(content)
+      }
+      break
+    }
+    case 'final_answer': {
+      const payload = eventData as AgentFinalAnswerPayload
+      if (payload.content) {
+        mergeFinalAnswerChunk(payload.content)
+      }
+      assistantMessage.thinkingDone = true
+      agentRunStatus.value = 'finished'
+      break
+    }
+    case 'hitl_interrupt': {
+      const payload = eventData as AgentHitlInterruptPayload
+      currentInterruptId.value = event.interruptId || ''
+      hitlToolCalls.value = payload.pendingToolCalls || []
+      hitlFeedbacks.value = (payload.pendingToolCalls || []).map((tool) => ({
+        ...tool,
+        arguments: ensureToolCallArgumentsString(tool.arguments),
+        result: 'APPROVED',
+      }))
+      interruptedAssistantMessage.value = assistantMessage
+      assistantMessage.pending = false
+      assistantMessage.thinkingDone = false
+      showHitlModal.value = true
+      agentRunStatus.value = 'interrupted'
+      break
+    }
+    case 'error': {
+      const payload = eventData as AgentErrorPayload
+      const message = payload.message || '调用失败'
+      pushFinalChunk(`\n\n[错误] ${message}`)
+      assistantMessage.pending = false
+      assistantMessage.thinkingDone = true
+      agentRunStatus.value = 'error'
+      break
+    }
+    default:
+      // 兜底兼容：如果后端新增事件但仍携带 content，前端也应可展示。
+      if (typeof eventData.content === 'string' && eventData.content) {
+        pushFinalChunk(eventData.content)
+      }
+      break
+  }
+}
+
+function mergeFinalAnswerChunk(fullContent: string) {
+  const currentRendered = activeAssistantMessage.value?.finalContent || ''
+  const currentBuffered = streamFinalBuffer.value
+  const currentTotal = `${currentRendered}${currentBuffered}`
+
+  // 没有增量内容时，直接按完整答案追加
+  if (!currentTotal) {
+    pushFinalChunk(fullContent)
+    return
+  }
+
+  // 常见情况：delta 已经部分输出，final_answer 给出完整文本，只补齐剩余部分
+  if (fullContent.startsWith(currentTotal)) {
+    const remain = fullContent.slice(currentTotal.length)
+    if (remain) {
+      pushFinalChunk(remain)
+    }
+    return
+  }
+
+  // 若当前内容已覆盖 final_answer（例如最后一帧已到），不再重复追加
+  if (currentTotal.startsWith(fullContent)) {
+    return
+  }
+
+  // 兜底：以 final_answer 为准进行覆盖，避免出现重复/错乱
+  if (activeAssistantMessage.value) {
+    activeAssistantMessage.value.finalContent = fullContent
+    streamFinalBuffer.value = ''
+    scrollToBottom()
+  }
+}
+
+function pushThinkingChunk(chunk: string) {
+  if (!chunk) {
+    return
+  }
+  const target = activeAssistantMessage.value
+  streamThinkingBuffer.value += chunk
+  if (target) {
+    ingestThinkingPreview(target, chunk)
+  }
+
+  if (target && !target.thinkingContent && streamThinkingBuffer.value.length > 0) {
+    target.thinkingContent = streamThinkingBuffer.value.slice(0, 1)
+    streamThinkingBuffer.value = streamThinkingBuffer.value.slice(1)
+    scrollToBottom()
+  }
+
+  if (streamRafId.value === null) {
+    streamRafId.value = window.requestAnimationFrame(runStreamFrame)
+  }
+}
+
+async function resolveAndResume() {
+  if (!currentInterruptId.value || hitlFeedbacks.value.length === 0) {
+    authError.value = '当前没有可处理的中断任务。'
+    return
+  }
+  const assistantMessage = interruptedAssistantMessage.value
+  if (!assistantMessage) {
+    authError.value = '会话状态异常，请重新发起提问。'
+    return
+  }
+
+  try {
+    agentRunStatus.value = 'resolving'
+    const payload: HitlCheckpointResolveRequest = {
+      interruptId: currentInterruptId.value,
+      feedbacks: hitlFeedbacks.value.map((item) => ({
+        id: item.id,
+        name: item.name,
+        arguments: ensureToolCallArgumentsString(item.arguments),
+        result: item.result || 'APPROVED',
+        description: item.description || '',
+      })),
+    }
+    await resolveHitlCheckpoint(payload)
+
+    showHitlModal.value = false
+    agentRunStatus.value = 'resuming'
+    assistantMessage.pending = true
+    activeAssistantMessage.value = assistantMessage
+    controller.value = new AbortController()
+
+    await resumeAgentStream(
+      { interruptId: currentInterruptId.value },
+      {
+        onAgentEvent(event) {
+          handleAgentEvent(event, assistantMessage)
+        },
+        onTransportError(message) {
+          pushFinalChunk(`\n\n[错误] ${message}`)
+          agentRunStatus.value = 'error'
+        },
+      },
+      controller.value.signal,
+    )
+
+    await waitForStreamDrain()
+    assistantMessage.pending = false
+    assistantMessage.thinkingDone = true
+    interruptedAssistantMessage.value = null
+    currentInterruptId.value = ''
+    hitlToolCalls.value = []
+    hitlFeedbacks.value = []
+    activeAssistantMessage.value = null
+    controller.value = null
+    agentRunStatus.value = 'finished'
+    void loadConversations(false)
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '处理审批失败，请稍后重试。'
+    agentRunStatus.value = 'error'
+  }
+}
+
 async function submitQuestion() {
   const question = inputValue.value.trim()
   if (!question || loading.value) {
@@ -523,7 +753,11 @@ async function submitQuestion() {
 
   const assistantMessage = appendAssistantMessage()
   activeAssistantMessage.value = assistantMessage
-  streamChunkBuffer.value = ''
+  interruptedAssistantMessage.value = null
+  currentInterruptId.value = ''
+  showHitlModal.value = false
+  hitlToolCalls.value = []
+  hitlFeedbacks.value = []
   streamThinkingBuffer.value = ''
   streamFinalBuffer.value = ''
 
@@ -534,30 +768,30 @@ async function submitQuestion() {
   }
 
   loading.value = true
+  agentRunStatus.value = 'calling'
   controller.value = new AbortController()
 
   try {
     await callAgentStream(
       payload,
       {
-        onMessage(chunk) {
-          pushStreamChunk(sanitizeThinkingChunk(chunk))
+        onAgentEvent(event) {
+          handleAgentEvent(event, assistantMessage)
         },
-        onError(errorText) {
-          const content = `[错误] ${errorText}`
-          if (!assistantMessage.finalContent && !streamFinalBuffer.value) {
-            pushFinalChunk(content)
-          } else {
-            pushFinalChunk(`\n\n${content}`)
-          }
+        onTransportError(message) {
+          pushFinalChunk(`\n\n[错误] ${message}`)
+          agentRunStatus.value = 'error'
         },
       },
       controller.value.signal,
     )
 
     await waitForStreamDrain()
-    assistantMessage.thinkingDone = true
-    if (!assistantMessage.finalContent?.trim() && !assistantMessage.thinkingContent?.trim()) {
+    const interrupted = Boolean(currentInterruptId.value)
+    if (!interrupted) {
+      assistantMessage.thinkingDone = true
+    }
+    if (!interrupted && !assistantMessage.finalContent?.trim() && !assistantMessage.thinkingContent?.trim()) {
       assistantMessage.finalContent = '已完成本次回答。'
     }
   } catch (error) {
@@ -569,12 +803,21 @@ async function submitQuestion() {
     }
     await waitForStreamDrain()
     assistantMessage.thinkingDone = true
+    agentRunStatus.value = 'error'
   } finally {
-    assistantMessage.pending = false
-    loading.value = false
-    controller.value = null
-    activeAssistantMessage.value = null
-    void loadConversations(false)
+    const interrupted = Boolean(currentInterruptId.value)
+    if (!interrupted) {
+      assistantMessage.pending = false
+      activeAssistantMessage.value = null
+      controller.value = null
+      loading.value = false
+      if (agentRunStatus.value === 'calling') {
+        agentRunStatus.value = 'finished'
+      }
+      void loadConversations(false)
+    } else {
+      loading.value = false
+    }
   }
 }
 
@@ -583,6 +826,7 @@ function stopGeneration() {
   resetStreamState()
   controller.value = null
   loading.value = false
+  agentRunStatus.value = 'idle'
 }
 
 function handleEnter(event: KeyboardEvent) {
@@ -629,35 +873,6 @@ function runStreamFrame() {
   streamRafId.value = window.requestAnimationFrame(runStreamFrame)
 }
 
-function pushStreamChunk(chunk: string) {
-  if (!chunk) {
-    return
-  }
-
-  const target = activeAssistantMessage.value
-  if (chunk.includes('[思考过程]')) {
-    const thinkingText = formatThinkingChunk(chunk)
-    if (thinkingText) {
-      streamThinkingBuffer.value += thinkingText
-      if (target) {
-        ingestThinkingPreview(target, thinkingText)
-      }
-    }
-  } else {
-    pushFinalChunk(chunk)
-  }
-
-  if (target && !target.thinkingContent && streamThinkingBuffer.value.length > 0) {
-    target.thinkingContent = streamThinkingBuffer.value.slice(0, 1)
-    streamThinkingBuffer.value = streamThinkingBuffer.value.slice(1)
-    scrollToBottom()
-  }
-
-  if (streamRafId.value === null) {
-    streamRafId.value = window.requestAnimationFrame(runStreamFrame)
-  }
-}
-
 function pushFinalChunk(chunk: string) {
   if (!chunk) {
     return
@@ -671,38 +886,10 @@ function pushFinalChunk(chunk: string) {
     target.thinkingDone = true
     scrollToBottom()
   }
-}
 
-function sanitizeThinkingChunk(chunk: string): string {
-  if (!chunk) {
-    return ''
+  if (streamRafId.value === null) {
+    streamRafId.value = window.requestAnimationFrame(runStreamFrame)
   }
-
-  // 兼容旧版后端的思考输出，过滤开发态字段，保留用户可读过程。
-  let sanitized = chunk
-    .replace(/\[思考过程\]\s+/g, '[思考过程] ')
-    .replace(/^\s*success:\s*.*$/gim, '')
-    .replace(/^\s*error:\s*N\/A\s*$/gim, '')
-    .replace(/^\s*error:\s*null\s*$/gim, '')
-    .replace(/^\s*output:\s*/gim, '')
-    .replace(/^\s*-\s*taskId:\s*.*$/gim, '')
-    .replace(/^\s*taskId:\s*.*$/gim, '')
-    .replace(/\n{3,}/g, '\n\n')
-
-  if (!sanitized.trim()) {
-    return ''
-  }
-
-  return sanitized
-}
-
-function formatThinkingChunk(chunk: string): string {
-  const stripped = chunk
-    .replace(/^\[思考过程\](?:\[[^\]]+])?\s*/gim, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-
-  return stripped ? `${stripped}\n\n` : ''
 }
 
 async function waitForStreamDrain() {
@@ -720,7 +907,6 @@ function resetStreamState() {
     window.clearTimeout(thinkingPreviewTimerId.value)
     thinkingPreviewTimerId.value = null
   }
-  streamChunkBuffer.value = ''
   streamThinkingBuffer.value = ''
   streamFinalBuffer.value = ''
   thinkingPreviewQueue.value = []
@@ -1023,6 +1209,53 @@ onBeforeUnmount(() => {
     >
       退出登录
     </button>
+
+    <div v-if="showHitlModal" class="modal-mask">
+      <div class="modal-card hitl-card" @click.stop>
+        <h3>人工确认执行</h3>
+        <p class="logout-desc">请确认以下工具调用，再继续 Agent 执行。</p>
+        <div class="hitl-list">
+          <div v-for="tool in hitlFeedbacks" :key="tool.id" class="hitl-item">
+            <p class="hitl-name">{{ tool.name }}</p>
+            <p class="hitl-desc">{{ tool.description || '待确认工具调用' }}</p>
+            <label class="field">
+              <span>处理结果</span>
+              <select
+                :value="tool.result || 'APPROVED'"
+                @change="
+                  updateHitlFeedback(tool.id, {
+                    result: ($event.target as HTMLSelectElement).value as PendingToolCall['result'],
+                  })
+                "
+              >
+                <option value="APPROVED">APPROVED</option>
+                <option value="REJECTED">REJECTED</option>
+                <option value="EDIT">EDIT</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>arguments(JSON 字符串)</span>
+              <textarea
+                class="hitl-args"
+                :value="tool.arguments"
+                @input="
+                  updateHitlFeedback(tool.id, {
+                    arguments: ($event.target as HTMLTextAreaElement).value,
+                  })
+                "
+              />
+            </label>
+          </div>
+        </div>
+        <p v-if="authError" class="error-tip">{{ authError }}</p>
+        <div class="modal-actions">
+          <button class="text-btn" type="button" @click="showHitlModal = false">稍后处理</button>
+          <button class="solid-btn" type="button" :disabled="agentRunStatus === 'resolving'" @click="resolveAndResume">
+            {{ agentRunStatus === 'resolving' ? '提交中...' : '提交并继续' }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="authModal !== 'none'" class="modal-mask" @click="closeAuthModal">
       <div class="modal-card" @click.stop>
@@ -1822,6 +2055,36 @@ onBeforeUnmount(() => {
   margin-bottom: 0.8rem;
 }
 
+.hitl-card {
+  width: min(680px, calc(100% - 2rem));
+}
+
+.hitl-list {
+  max-height: 360px;
+  overflow: auto;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.hitl-item {
+  border: 1px solid #e6e6eb;
+  border-radius: 0.75rem;
+  padding: 0.65rem;
+}
+
+.hitl-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #22242a;
+}
+
+.hitl-desc {
+  margin-top: 0.2rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.8rem;
+  color: #6a7280;
+}
+
 .field {
   display: grid;
   gap: 0.35rem;
@@ -1841,8 +2104,32 @@ onBeforeUnmount(() => {
   outline: none;
 }
 
+.field select {
+  border: 1px solid #dddde3;
+  border-radius: 0.72rem;
+  padding: 0.48rem 0.62rem;
+  font-size: 0.86rem;
+  outline: none;
+  background: #fff;
+}
+
 .field input:focus {
   border-color: #a3a3ad;
+}
+
+.field select:focus {
+  border-color: #a3a3ad;
+}
+
+.hitl-args {
+  border: 1px solid #dddde3;
+  border-radius: 0.72rem;
+  padding: 0.52rem 0.62rem;
+  font-size: 0.82rem;
+  min-height: 72px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
 }
 
 .error-tip {

@@ -16,17 +16,50 @@ export interface AgentCallRequest {
   conversationId?: string
 }
 
-export type AgentSseEventName = 'message' | 'error' | string
+export interface AgentResumeRequest {
+  interruptId: string
+}
 
-export interface AgentSseEvent {
-  event: AgentSseEventName
-  data: string
+export type AgentEventType = 'thinking_step' | 'assistant_delta' | 'final_answer' | 'hitl_interrupt' | 'error'
+
+export interface AgentThinkingStepPayload {
+  stage?: string
+  title?: string
+  content?: string
+}
+
+export interface PendingToolCall {
+  id: string
+  name: string
+  arguments: string
+  result: 'APPROVED' | 'REJECTED' | 'EDIT' | null
+  description?: string
+}
+
+export interface AgentHitlInterruptPayload {
+  agentType?: string
+  pendingToolCalls?: PendingToolCall[]
+  status?: string
+}
+
+export interface AgentFinalAnswerPayload {
+  content?: string
+}
+
+export interface AgentErrorPayload {
+  message?: string
+}
+
+export interface AgentStreamEvent {
+  type: AgentEventType | string
+  conversationId?: string
+  interruptId?: string
+  data?: AgentThinkingStepPayload | AgentHitlInterruptPayload | AgentFinalAnswerPayload | AgentErrorPayload
 }
 
 export interface AgentStreamHandlers {
   onOpen?: () => void
-  onMessage?: (data: string) => void
-  onError?: (error: string) => void
-  onEvent?: (event: AgentSseEvent) => void
+  onAgentEvent?: (event: AgentStreamEvent) => void
+  onTransportError?: (error: string) => void
   onComplete?: () => void
 }
