@@ -70,6 +70,7 @@ const inputValue = ref('')
 const mode = ref<'fast' | 'thinking'>('fast')
 const showModeMenu = ref(false)
 const sidebarCollapsed = ref(false)
+const knowledgeQaMode = ref(false)
 const loading = ref(false)
 const authLoading = ref(false)
 const authError = ref('')
@@ -245,6 +246,7 @@ function fillPrompt(prompt: string) {
 }
 
 async function startNewChat() {
+  knowledgeQaMode.value = false
   controller.value?.abort()
   resetStreamState()
   controller.value = null
@@ -265,6 +267,10 @@ async function startNewChat() {
   } catch (error) {
     authError.value = error instanceof Error ? error.message : '新建会话失败，请稍后再试。'
   }
+}
+
+function showKnowledgeQaPanel() {
+  knowledgeQaMode.value = true
 }
 
 function toggleModeMenu() {
@@ -509,6 +515,7 @@ async function switchConversation(conversationId: string) {
   if (!conversationId || conversationId === activeConversationId.value) {
     return
   }
+  knowledgeQaMode.value = false
   activeConversationId.value = conversationId
   await syncActiveConversationDetail(conversationId)
   await loadConversationHistory(conversationId)
@@ -1299,31 +1306,34 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <button class="knowledge-chat-btn" type="button" @click="showKnowledgeQaPanel">知识库问答</button>
       <button class="new-chat-btn" type="button" @click="startNewChat">+ 新建会话</button>
 
       <div class="nav-group">
         <p class="nav-title">会话列表</p>
-        <div v-if="!isLoggedIn" class="conversation-empty">登录后可查看会话</div>
-        <div v-else-if="conversationLoading" class="conversation-empty">会话加载中...</div>
-        <div v-else-if="conversations.length === 0" class="conversation-empty">暂无会话</div>
-        <button
-          v-for="conversation in conversations"
-          :key="conversation.conversationId"
-          class="conversation-item"
-          :class="{ active: activeConversationId === conversation.conversationId }"
-          type="button"
-          @click="switchConversation(conversation.conversationId)"
-        >
-          <span class="conversation-title">{{ conversation.title || '新会话' }}</span>
-          <span
-            class="conversation-delete"
-            role="button"
-            tabindex="0"
-            @click.stop="removeConversation(conversation.conversationId)"
+        <div class="conversation-list-scroll">
+          <div v-if="!isLoggedIn" class="conversation-empty">登录后可查看会话</div>
+          <div v-else-if="conversationLoading" class="conversation-empty">会话加载中...</div>
+          <div v-else-if="conversations.length === 0" class="conversation-empty">暂无会话</div>
+          <button
+            v-for="conversation in conversations"
+            :key="conversation.conversationId"
+            class="conversation-item"
+            :class="{ active: activeConversationId === conversation.conversationId }"
+            type="button"
+            @click="switchConversation(conversation.conversationId)"
           >
-            {{ deletingConversationId === conversation.conversationId ? '...' : '×' }}
-          </span>
-        </button>
+            <span class="conversation-title">{{ conversation.title || '新会话' }}</span>
+            <span
+              class="conversation-delete"
+              role="button"
+              tabindex="0"
+              @click.stop="removeConversation(conversation.conversationId)"
+            >
+              {{ deletingConversationId === conversation.conversationId ? '...' : '×' }}
+            </span>
+          </button>
+        </div>
       </div>
     </aside>
 
@@ -1347,10 +1357,19 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
-      <section ref="chatRef" class="chat-panel" :class="{ empty: !hasMessages }">
+      <section ref="chatRef" class="chat-panel" :class="{ empty: !hasMessages || knowledgeQaMode }">
         <div class="chat-content">
-          <div v-if="historyLoading" class="history-loading">正在加载会话历史...</div>
-          <template v-if="hasMessages">
+          <div v-if="historyLoading && !knowledgeQaMode" class="history-loading">正在加载会话历史...</div>
+          <template v-if="knowledgeQaMode">
+            <div class="empty-state">
+              <h2>知识库问答</h2>
+              <div class="kb-action-grid">
+                <button type="button" class="kb-action-btn">新建知识库</button>
+                <button type="button" class="kb-action-btn">知识库浏览</button>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="hasMessages">
             <article
               v-for="message in messages"
               :key="message.id"
@@ -1688,11 +1707,13 @@ onBeforeUnmount(() => {
   --line: #e3e3e6;
   --text: #171717;
   --muted: #8c8c92;
+  height: 100vh;
   min-height: 100vh;
   display: grid;
   grid-template-columns: 270px 1fr;
   background: var(--bg);
   color: var(--text);
+  overflow: hidden;
   transition: grid-template-columns 0.22s ease;
 }
 
@@ -1707,9 +1728,11 @@ onBeforeUnmount(() => {
 .sidebar {
   border-right: 1px solid var(--line);
   background: #f7f7f8;
+  height: 100vh;
   padding: 1.2rem 0.9rem;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   gap: 1rem;
   overflow: hidden;
 }
@@ -1746,6 +1769,7 @@ onBeforeUnmount(() => {
   font-size: 0.75rem;
 }
 
+.knowledge-chat-btn,
 .new-chat-btn,
 .quick-prompt-btn {
   border: 1px solid var(--line);
@@ -1756,11 +1780,19 @@ onBeforeUnmount(() => {
   transition: all 0.2s ease;
 }
 
+.knowledge-chat-btn {
+  padding: 0.65rem 0.82rem;
+  font-weight: 600;
+  background: #f0f6ff;
+  border-color: #cadcff;
+}
+
 .new-chat-btn {
   padding: 0.68rem 0.82rem;
   font-weight: 600;
 }
 
+.knowledge-chat-btn:hover,
 .new-chat-btn:hover,
 .quick-prompt-btn:hover {
   border-color: #cfcfd4;
@@ -1768,8 +1800,30 @@ onBeforeUnmount(() => {
 }
 
 .nav-group {
-  display: grid;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
   gap: 0.5rem;
+}
+
+.conversation-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-right: 0.1rem;
+}
+
+.conversation-list-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.conversation-list-scroll::-webkit-scrollbar-thumb {
+  background: #d6d6dc;
+  border-radius: 999px;
 }
 
 .nav-title {
@@ -1990,6 +2044,31 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.65rem;
+}
+
+.kb-action-grid {
+  margin-top: 1.5rem;
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.kb-action-btn {
+  border: 1px solid #dcdce3;
+  border-radius: 0.8rem;
+  background: #fff;
+  color: #2f2f34;
+  padding: 0.62rem 1.2rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.kb-action-btn:hover {
+  border-color: #c9c9d1;
+  background: #f8f8fa;
+  transform: translateY(-1px);
 }
 
 .suggestion-chip {
