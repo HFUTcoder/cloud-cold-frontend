@@ -17,6 +17,11 @@ body {
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background:
+    radial-gradient(circle at top left, rgba(110, 157, 255, 0.16), transparent 30%),
+    radial-gradient(circle at 85% 15%, rgba(255, 196, 122, 0.16), transparent 28%),
+    linear-gradient(180deg, #f4f8fd 0%, #eef3fa 100%);
+  color: #122033;
 }
 
 p,
@@ -34,4 +39,9 @@ textarea,
 select,
 input {
   font: inherit;
+}
+
+::selection {
+  background: rgba(98, 141, 214, 0.22);
+  color: #10203a;
 }

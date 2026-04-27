@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import KnowledgeWorkspace from '@/components/knowledge/KnowledgeWorkspace.vue'
 import { callAgentStream, resumeAgentStream } from '@/api/agent'
 import {
   createConversation,
@@ -10,6 +11,7 @@ import {
   updateConversationSkills,
 } from '@/api/chat'
 import { getHitlCheckpoint, resolveHitlCheckpoint } from '@/api/hitl'
+import { listMyKnowledgeByPage } from '@/api/knowledge'
 import { listSkills } from '@/api/skill'
 import { getLoginUser, userLogin, userLogout, userRegister } from '@/api/user'
 import type {
@@ -23,6 +25,7 @@ import type {
 } from '@/types/agent'
 import type { ChatConversation, ChatMemoryHistory } from '@/types/chat'
 import type { HitlCheckpointResolveRequest } from '@/types/hitl'
+import type { KnowledgeVO } from '@/types/knowledge'
 import type { SkillMetadataVO } from '@/types/skill'
 import type { LoginUserVO } from '@/types/user'
 
@@ -66,6 +69,8 @@ interface HitlArgumentField {
 const chatRef = ref<HTMLElement | null>(null)
 const modeMenuRef = ref<HTMLElement | null>(null)
 const skillMenuRef = ref<HTMLElement | null>(null)
+const knowledgeAskMenuRef = ref<HTMLElement | null>(null)
+const composerInputRef = ref<HTMLTextAreaElement | null>(null)
 const inputValue = ref('')
 const mode = ref<'fast' | 'thinking'>('fast')
 const showModeMenu = ref(false)
@@ -114,7 +119,10 @@ const pendingDeleteConversationId = ref('')
 const showSkillMenu = ref(false)
 const skillListLoading = ref(false)
 const skillBindingLoading = ref(false)
+const showKnowledgeAskMenu = ref(false)
+const knowledgeAskListLoading = ref(false)
 const skills = ref<SkillMetadataVO[]>([])
+const knowledgeOptions = ref<KnowledgeVO[]>([])
 const hoveredSkillName = ref('')
 const selectedSkillName = ref('')
 
@@ -144,6 +152,10 @@ const activeConversationTitle = computed(() => {
   const active = conversations.value.find((item) => item.conversationId === activeConversationId.value)
   return active?.title || '新对话'
 })
+const pageTitle = computed(() => (knowledgeQaMode.value ? '知识库工作台' : activeConversationTitle.value))
+const pageSubtitle = computed(() =>
+  knowledgeQaMode.value ? '上传文档、查看状态与整理知识库' : '内容由 AI 生成，请仔细甄别',
+)
 const hoveredSkill = computed(() => {
   const name = hoveredSkillName.value || selectedSkillName.value
   return skills.value.find((item) => item.name === name)
@@ -245,6 +257,24 @@ function fillPrompt(prompt: string) {
   inputValue.value = prompt
 }
 
+function buildKnowledgeQuestionPrefix(knowledgeName: string) {
+  return `请根据${knowledgeName}知识库回答：`
+}
+
+function removeKnowledgeQuestionPrefix(text: string) {
+  return text.replace(/^请根据(?:.+?)?知识库回答：/, '')
+}
+
+function applyKnowledgeQuestionPrefix(knowledgeName: string) {
+  const nextContent = removeKnowledgeQuestionPrefix(inputValue.value)
+  inputValue.value = `${buildKnowledgeQuestionPrefix(knowledgeName)}${nextContent}`
+  nextTick(() => {
+    composerInputRef.value?.focus()
+    const cursorPosition = inputValue.value.length
+    composerInputRef.value?.setSelectionRange(cursorPosition, cursorPosition)
+  })
+}
+
 async function startNewChat() {
   knowledgeQaMode.value = false
   controller.value?.abort()
@@ -270,22 +300,44 @@ async function startNewChat() {
 }
 
 function showKnowledgeQaPanel() {
+  showModeMenu.value = false
+  showSkillMenu.value = false
   knowledgeQaMode.value = true
+}
+
+function showChatPanel() {
+  knowledgeQaMode.value = false
 }
 
 function toggleModeMenu() {
   showSkillMenu.value = false
+  showKnowledgeAskMenu.value = false
   showModeMenu.value = !showModeMenu.value
 }
 
 async function toggleSkillMenu() {
   showModeMenu.value = false
+  showKnowledgeAskMenu.value = false
   showSkillMenu.value = !showSkillMenu.value
   if (!showSkillMenu.value) {
     return
   }
   await loadSkills()
   hoveredSkillName.value = selectedSkillName.value
+}
+
+async function toggleKnowledgeAskMenu() {
+  if (!isLoggedIn.value) {
+    openAuthModal('login')
+    return
+  }
+  showModeMenu.value = false
+  showSkillMenu.value = false
+  showKnowledgeAskMenu.value = !showKnowledgeAskMenu.value
+  if (!showKnowledgeAskMenu.value) {
+    return
+  }
+  await loadKnowledgeOptions()
 }
 
 function chooseMode(nextMode: 'fast' | 'thinking') {
@@ -305,6 +357,29 @@ async function loadSkills() {
   } finally {
     skillListLoading.value = false
   }
+}
+
+async function loadKnowledgeOptions() {
+  knowledgeAskListLoading.value = true
+  try {
+    const page = await listMyKnowledgeByPage({
+      pageNum: 1,
+      pageSize: 100,
+      sortField: 'updateTime',
+      sortOrder: 'descend',
+    })
+    knowledgeOptions.value = page.records ?? []
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '加载知识库列表失败，请稍后再试。'
+    knowledgeOptions.value = []
+  } finally {
+    knowledgeAskListLoading.value = false
+  }
+}
+
+function chooseKnowledgeQuestion(knowledgeName: string) {
+  applyKnowledgeQuestionPrefix(knowledgeName)
+  showKnowledgeAskMenu.value = false
 }
 
 async function bindSkill(skillName: string) {
@@ -1148,6 +1223,15 @@ function handleGlobalClick(event: MouseEvent) {
   if (showSkillMenu.value && skillMenuRef.value && target && !skillMenuRef.value.contains(target)) {
     showSkillMenu.value = false
   }
+
+  if (
+    showKnowledgeAskMenu.value &&
+    knowledgeAskMenuRef.value &&
+    target &&
+    !knowledgeAskMenuRef.value.contains(target)
+  ) {
+    showKnowledgeAskMenu.value = false
+  }
 }
 
 function runStreamFrame() {
@@ -1306,7 +1390,14 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <button class="knowledge-chat-btn" type="button" @click="showKnowledgeQaPanel">知识库问答</button>
+      <button
+        class="knowledge-chat-btn"
+        :class="{ active: knowledgeQaMode }"
+        type="button"
+        @click="knowledgeQaMode ? showChatPanel() : showKnowledgeQaPanel()"
+      >
+        {{ knowledgeQaMode ? '返回对话' : '知识库工作台' }}
+      </button>
       <button class="new-chat-btn" type="button" @click="startNewChat">+ 新建会话</button>
 
       <div class="nav-group">
@@ -1339,12 +1430,14 @@ onBeforeUnmount(() => {
 
     <main class="chat-main">
       <header class="topbar">
-        <button class="top-icon-btn" type="button" @click="sidebarCollapsed = !sidebarCollapsed">
-          <span class="bars"></span>
-        </button>
+        <div class="top-left-actions">
+          <button class="top-icon-btn" type="button" @click="sidebarCollapsed = !sidebarCollapsed">
+            <span class="bars"></span>
+          </button>
+        </div>
         <div class="top-center">
-          <h1>{{ activeConversationTitle }}</h1>
-          <p>内容由 AI 生成，请仔细甄别</p>
+          <h1>{{ pageTitle }}</h1>
+          <p>{{ pageSubtitle }}</p>
         </div>
         <div class="top-right-actions">
           <template v-if="!isLoggedIn">
@@ -1361,13 +1454,11 @@ onBeforeUnmount(() => {
         <div class="chat-content">
           <div v-if="historyLoading && !knowledgeQaMode" class="history-loading">正在加载会话历史...</div>
           <template v-if="knowledgeQaMode">
-            <div class="empty-state">
-              <h2>知识库问答</h2>
-              <div class="kb-action-grid">
-                <button type="button" class="kb-action-btn">新建知识库</button>
-                <button type="button" class="kb-action-btn">知识库浏览</button>
-              </div>
-            </div>
+            <KnowledgeWorkspace
+              :current-user="currentUser"
+              @request-login="openAuthModal('login')"
+              @exit="showChatPanel"
+            />
           </template>
           <template v-else-if="hasMessages">
             <article
@@ -1425,12 +1516,13 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <footer class="composer-wrap">
+      <footer v-if="!knowledgeQaMode" class="composer-wrap">
         <div class="composer">
           <div v-if="selectedSkillName" class="selected-skill-chip">
             已绑定 Skill：{{ selectedSkillName }}
           </div>
           <textarea
+            ref="composerInputRef"
             v-model="inputValue"
             class="composer-input"
             placeholder="发消息..."
@@ -1441,7 +1533,7 @@ onBeforeUnmount(() => {
               <button class="tool-btn" type="button" aria-label="更多">+</button>
 
               <div ref="modeMenuRef" class="mode-picker">
-                <button class="mode-trigger" type="button" @click.stop="toggleModeMenu">
+                <button class="mode-trigger mode-trigger-mode" type="button" @click.stop="toggleModeMenu">
                   <span>⚡ {{ modeLabel }}</span>
                   <span class="arrow">›</span>
                 </button>
@@ -1462,7 +1554,7 @@ onBeforeUnmount(() => {
               </div>
 
               <div ref="skillMenuRef" class="skill-picker">
-                <button class="mode-trigger skill-trigger" type="button" @click.stop="toggleSkillMenu">
+                <button class="mode-trigger mode-trigger-skill skill-trigger" type="button" @click.stop="toggleSkillMenu">
                   <span>🧩 Skill</span>
                   <span class="arrow">›</span>
                 </button>
@@ -1495,6 +1587,34 @@ onBeforeUnmount(() => {
                     <p v-if="hoveredSkill">{{ hoveredSkill.description || '暂无描述' }}</p>
                     <p v-else class="skill-hint">鼠标悬浮查看 Skill 描述</p>
                   </div>
+                </div>
+              </div>
+
+              <div ref="knowledgeAskMenuRef" class="knowledge-ask-picker">
+                <button
+                  class="mode-trigger mode-trigger-knowledge knowledge-ask-trigger"
+                  type="button"
+                  @click.stop="toggleKnowledgeAskMenu"
+                >
+                  <span>📚 知识库问答</span>
+                  <span class="arrow">›</span>
+                </button>
+
+                <div v-if="showKnowledgeAskMenu" class="knowledge-ask-dropdown">
+                  <div v-if="knowledgeAskListLoading" class="knowledge-ask-hint">加载中...</div>
+                  <div v-else-if="knowledgeOptions.length === 0" class="knowledge-ask-hint">
+                    暂无知识库，请先创建
+                  </div>
+                  <button
+                    v-for="knowledge in knowledgeOptions"
+                    :key="knowledge.id"
+                    type="button"
+                    class="knowledge-ask-item"
+                    @click="chooseKnowledgeQuestion(knowledge.knowledgeName)"
+                  >
+                    <span class="knowledge-ask-item-title">{{ knowledge.knowledgeName }}</span>
+                    <span class="knowledge-ask-item-meta">{{ knowledge.documentCount }} 份文档</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -1787,6 +1907,13 @@ onBeforeUnmount(() => {
   border-color: #cadcff;
 }
 
+.knowledge-chat-btn.active {
+  background: #14213b;
+  border-color: #14213b;
+  color: #fff;
+  box-shadow: 0 14px 28px rgba(20, 33, 59, 0.16);
+}
+
 .new-chat-btn {
   padding: 0.68rem 0.82rem;
   font-weight: 600;
@@ -1893,10 +2020,16 @@ onBeforeUnmount(() => {
   height: 64px;
   border-bottom: 1px solid var(--line);
   display: grid;
-  grid-template-columns: 48px 1fr auto;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   padding: 0 0.7rem;
   background: #fff;
+}
+
+.top-left-actions {
+  justify-self: start;
+  display: flex;
+  align-items: center;
 }
 
 .top-icon-btn {
@@ -1968,7 +2101,8 @@ onBeforeUnmount(() => {
 }
 
 .top-right-actions {
-  min-width: 132px;
+  min-width: 0;
+  justify-self: end;
   display: flex;
   justify-content: flex-end;
   align-items: center;
@@ -2291,6 +2425,10 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
+.knowledge-ask-picker {
+  position: relative;
+}
+
 .mode-trigger {
   height: 34px;
   border: none;
@@ -2309,10 +2447,80 @@ onBeforeUnmount(() => {
   min-width: 96px;
 }
 
+.knowledge-ask-trigger {
+  min-width: 148px;
+  background: #eef5ff;
+  color: #173a6a;
+}
+
+.knowledge-ask-dropdown {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.5rem);
+  width: 248px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid #dddddf;
+  border-radius: 1rem;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+  padding: 0.4rem;
+  display: grid;
+  gap: 0.32rem;
+  z-index: 21;
+}
+
+.knowledge-ask-dropdown::-webkit-scrollbar,
+.skill-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.knowledge-ask-dropdown::-webkit-scrollbar-thumb,
+.skill-list::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(157, 173, 197, 0.85), rgba(129, 147, 174, 0.85));
+  border-radius: 999px;
+}
+
+.knowledge-ask-hint {
+  padding: 0.8rem 0.82rem;
+  color: #768397;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  border-radius: 0.86rem;
+  background: linear-gradient(180deg, rgba(244, 248, 253, 0.98), rgba(239, 244, 251, 0.98));
+  border: 1px dashed rgba(204, 214, 229, 0.88);
+}
+
+.knowledge-ask-item {
+  width: 100%;
+  border-radius: 0.8rem;
+  color: #2a2a30;
+  display: grid;
+  gap: 0.2rem;
+  text-align: left;
+  padding: 0.72rem 0.78rem;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.knowledge-ask-item:hover {
+  background: #edf3ff;
+}
+
+.knowledge-ask-item-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.knowledge-ask-item-meta {
+  font-size: 0.76rem;
+  color: #7f8088;
+}
+
 .arrow {
   font-size: 1.15rem;
   line-height: 1;
-  color: #7d7d83;
+  color: #8390a3;
 }
 
 .mode-dropdown {
@@ -2324,8 +2532,10 @@ onBeforeUnmount(() => {
   border-radius: 1rem;
   background: #fff;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
-  padding: 0.4rem;
+  padding: 0.48rem;
   z-index: 20;
+  display: grid;
+  gap: 0.36rem;
 }
 
 .skill-dropdown {
@@ -2341,12 +2551,12 @@ onBeforeUnmount(() => {
   z-index: 21;
   display: grid;
   grid-template-columns: 180px 1fr;
-  gap: 0.45rem;
+  gap: 0.5rem;
 }
 
 .skill-list {
-  border-right: 1px solid #ececf2;
-  padding-right: 0.45rem;
+  border-right: 1px solid rgba(230, 234, 241, 0.95);
+  padding-right: 0.5rem;
   max-height: 240px;
   overflow: auto;
   display: grid;
@@ -2355,8 +2565,6 @@ onBeforeUnmount(() => {
 }
 
 .skill-item {
-  border: 1px solid #ececf2;
-  background: #fff;
   border-radius: 0.65rem;
   text-align: left;
   padding: 0.45rem 0.52rem;
@@ -2366,11 +2574,13 @@ onBeforeUnmount(() => {
 
 .skill-item:hover,
 .skill-item.active {
-  border-color: #1f2937;
+  border-color: rgba(114, 147, 205, 0.96);
+  background: linear-gradient(135deg, rgba(236, 243, 255, 0.98), rgba(249, 251, 255, 0.98));
 }
 
 .skill-item.unbind {
   color: #9a3a3a;
+  background: linear-gradient(180deg, rgba(255, 249, 249, 0.98), rgba(255, 243, 243, 0.98));
 }
 
 .skill-item:disabled {
@@ -2379,10 +2589,13 @@ onBeforeUnmount(() => {
 }
 
 .skill-desc {
-  padding: 0.45rem 0.55rem;
+  padding: 0.7rem 0.72rem;
   color: #5c6472;
   font-size: 0.82rem;
   line-height: 1.5;
+  border-radius: 0.86rem;
+  background: linear-gradient(180deg, rgba(247, 250, 255, 0.98), rgba(242, 246, 252, 0.96));
+  border: 1px solid rgba(227, 232, 241, 0.92);
 }
 
 .skill-hint {
@@ -2391,31 +2604,32 @@ onBeforeUnmount(() => {
 
 .mode-item {
   width: 100%;
-  border: none;
-  background: transparent;
   border-radius: 0.7rem;
   text-align: left;
-  padding: 0.5rem 0.58rem;
+  padding: 0.68rem 0.74rem;
   cursor: pointer;
 }
 
 .mode-item:hover {
-  background: #f3f3f4;
+  background: linear-gradient(180deg, rgba(248, 251, 255, 0.98), rgba(240, 245, 252, 0.98));
 }
 
 .mode-item.active {
-  background: #f0f0f2;
+  border-color: rgba(121, 154, 214, 0.95);
+  background: linear-gradient(135deg, rgba(234, 242, 255, 0.98), rgba(247, 250, 255, 0.98));
 }
 
 .mode-item-main {
   font-size: 1rem;
+  font-weight: 600;
   color: #202024;
 }
 
 .mode-item-desc {
-  margin-top: 0.12rem;
+  margin-top: 0.22rem;
   font-size: 0.82rem;
   color: #8e8e95;
+  line-height: 1.45;
 }
 
 .right-tools {
@@ -2639,6 +2853,478 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 
+.doubao-shell {
+  --bg: #edf3fa;
+  --panel: rgba(255, 255, 255, 0.72);
+  --line: rgba(153, 170, 196, 0.26);
+  --text: #142234;
+  --muted: #73829b;
+  position: relative;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(111, 154, 245, 0.2), transparent 24%),
+    radial-gradient(circle at 100% 12%, rgba(255, 196, 123, 0.2), transparent 28%),
+    linear-gradient(135deg, #edf3fa 0%, #f7faff 40%, #fffdf7 100%);
+}
+
+.doubao-shell::before,
+.doubao-shell::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  filter: blur(24px);
+  opacity: 0.85;
+}
+
+.doubao-shell::before {
+  width: 280px;
+  height: 280px;
+  left: -100px;
+  top: -80px;
+  border-radius: 50%;
+  background: rgba(112, 151, 230, 0.22);
+}
+
+.doubao-shell::after {
+  width: 320px;
+  height: 320px;
+  right: -120px;
+  bottom: -80px;
+  border-radius: 50%;
+  background: rgba(255, 208, 142, 0.18);
+}
+
+.sidebar {
+  position: relative;
+  border-right: 1px solid rgba(203, 214, 230, 0.55);
+  background:
+    linear-gradient(180deg, rgba(252, 253, 255, 0.9) 0%, rgba(244, 248, 255, 0.82) 100%);
+  backdrop-filter: blur(22px);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.48);
+}
+
+.brand {
+  position: relative;
+  padding: 0.35rem 0.2rem 0.5rem;
+}
+
+.brand-icon {
+  background: linear-gradient(135deg, #17335f 0%, #2856a0 100%);
+  box-shadow: 0 14px 26px rgba(28, 55, 110, 0.22);
+}
+
+.brand-title {
+  color: #12213a;
+  letter-spacing: -0.02em;
+}
+
+.brand-subtitle {
+  color: #7988a3;
+}
+
+.knowledge-chat-btn,
+.new-chat-btn,
+.quick-prompt-btn,
+.conversation-item {
+  box-shadow: 0 10px 22px rgba(43, 63, 108, 0.04);
+}
+
+.knowledge-chat-btn,
+.new-chat-btn,
+.quick-prompt-btn {
+  border-color: rgba(199, 209, 225, 0.72);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 250, 255, 0.92));
+}
+
+.knowledge-chat-btn {
+  background: linear-gradient(135deg, rgba(232, 241, 255, 0.96), rgba(251, 246, 235, 0.98));
+  border-color: rgba(165, 188, 230, 0.62);
+  color: #15335f;
+}
+
+.knowledge-chat-btn.active {
+  background: linear-gradient(135deg, #18335e 0%, #2a579f 100%);
+  border-color: rgba(33, 73, 138, 0.9);
+  color: #fff;
+}
+
+.new-chat-btn {
+  color: #1f2d42;
+}
+
+.conversation-list-scroll {
+  padding-right: 0.25rem;
+}
+
+.conversation-list-scroll::-webkit-scrollbar {
+  width: 7px;
+}
+
+.conversation-list-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(146, 163, 191, 0.75), rgba(117, 135, 165, 0.75));
+}
+
+.conversation-item {
+  position: relative;
+  border-color: rgba(207, 216, 229, 0.8);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(249, 251, 255, 0.94));
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+
+.conversation-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(171, 191, 223, 0.88);
+  box-shadow: 0 14px 24px rgba(47, 76, 136, 0.08);
+}
+
+.conversation-item.active {
+  border-color: rgba(79, 120, 192, 0.75);
+  background: linear-gradient(135deg, rgba(235, 243, 255, 0.98), rgba(255, 253, 247, 0.98));
+  box-shadow: 0 16px 28px rgba(53, 84, 145, 0.11);
+}
+
+.conversation-item.active::before {
+  content: '';
+  position: absolute;
+  inset: 0.4rem auto 0.4rem 0.42rem;
+  width: 3px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #2f65bd 0%, #84a9ea 100%);
+}
+
+.conversation-item.active .conversation-title {
+  padding-left: 0.4rem;
+}
+
+.chat-main {
+  background: transparent;
+}
+
+.topbar {
+  position: relative;
+  border-bottom: 1px solid rgba(202, 213, 229, 0.58);
+  background: rgba(250, 252, 255, 0.72);
+  backdrop-filter: blur(20px);
+}
+
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 1rem;
+  right: 1rem;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, rgba(161, 176, 199, 0.65) 18%, rgba(161, 176, 199, 0.65) 82%, transparent 100%);
+}
+
+.top-icon-btn,
+.auth-btn,
+.user-chip {
+  border-color: rgba(204, 214, 228, 0.8);
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(12px);
+}
+
+.top-icon-btn:hover {
+  background: rgba(247, 250, 255, 0.96);
+}
+
+.top-center {
+  transform: translateY(2px);
+}
+
+.top-center h1 {
+  font: 700 0.98rem/1.15 'Avenir Next', 'PingFang SC', sans-serif;
+  color: #23344d;
+  letter-spacing: -0.02em;
+}
+
+.top-center p {
+  color: #8a97aa;
+}
+
+.auth-btn.primary {
+  background: linear-gradient(135deg, #18345f 0%, #2857a0 100%);
+  border-color: #18345f;
+  box-shadow: 0 12px 24px rgba(33, 63, 122, 0.18);
+}
+
+.user-chip {
+  color: #2d3b52;
+  box-shadow: 0 10px 24px rgba(45, 62, 96, 0.08);
+}
+
+.chat-panel {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 16%),
+    transparent;
+}
+
+.chat-content {
+  position: relative;
+}
+
+.empty-state h2 {
+  color: #15243b;
+  letter-spacing: -0.04em;
+  text-shadow: 0 12px 32px rgba(98, 125, 176, 0.14);
+}
+
+.suggestion-chip {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(237, 242, 249, 0.96));
+  border: 1px solid rgba(214, 222, 235, 0.85);
+  color: #314157;
+  box-shadow: 0 12px 26px rgba(41, 59, 103, 0.05);
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+
+.suggestion-chip:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 1), rgba(240, 245, 252, 1));
+  border-color: rgba(165, 184, 214, 0.92);
+  box-shadow: 0 16px 30px rgba(55, 82, 136, 0.09);
+  transform: translateY(-2px);
+}
+
+.message-bubble {
+  border-color: rgba(216, 224, 237, 0.82);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(250, 252, 255, 0.94));
+  box-shadow: 0 16px 28px rgba(38, 55, 97, 0.05);
+}
+
+.message-row.assistant .message-bubble {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(246, 249, 255, 0.92));
+}
+
+.message-row.user .message-bubble {
+  background: linear-gradient(135deg, rgba(235, 243, 255, 0.92), rgba(255, 249, 239, 0.92));
+  border-color: rgba(187, 205, 233, 0.9);
+  box-shadow: 0 18px 30px rgba(53, 79, 130, 0.09);
+}
+
+.role-tag {
+  color: #728097;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.thinking-box {
+  border-color: rgba(217, 225, 239, 0.88);
+  background: linear-gradient(180deg, rgba(250, 252, 255, 0.96), rgba(243, 246, 252, 0.94));
+}
+
+.thinking-header {
+  color: #4e5f77;
+}
+
+.thinking-body {
+  border-top-color: rgba(224, 229, 237, 0.9);
+  color: #5a6678;
+}
+
+.composer-wrap {
+  background: linear-gradient(180deg, transparent 0%, rgba(244, 248, 253, 0.88) 42%, rgba(244, 248, 253, 0.98) 100%);
+}
+
+.composer {
+  border: 1px solid rgba(194, 208, 229, 0.88);
+  border-radius: 1.6rem;
+  background: rgba(255, 255, 255, 0.84);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 24px 44px rgba(41, 63, 110, 0.1);
+  transition:
+    box-shadow 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.2s ease;
+}
+
+.composer:focus-within {
+  border-color: rgba(117, 154, 218, 0.95);
+  box-shadow:
+    0 26px 48px rgba(40, 67, 121, 0.12),
+    0 0 0 4px rgba(117, 154, 218, 0.12);
+  transform: translateY(-1px);
+}
+
+.selected-skill-chip {
+  border-color: rgba(212, 219, 233, 0.92);
+  background: rgba(255, 255, 255, 0.94);
+  color: #53637c;
+  box-shadow: 0 10px 22px rgba(43, 60, 101, 0.06);
+}
+
+.composer-input {
+  color: #1b2a3f;
+}
+
+.composer-input::placeholder {
+  color: #9eaaba;
+}
+
+.tool-btn,
+.mode-trigger,
+.send-btn.ghost {
+  background: linear-gradient(180deg, rgba(247, 249, 252, 0.98), rgba(236, 241, 248, 0.98));
+  border: 1px solid rgba(208, 217, 231, 0.86);
+  box-shadow: 0 10px 20px rgba(38, 54, 91, 0.04);
+}
+
+.tool-btn {
+  display: grid;
+  place-items: center;
+  color: #324257;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+
+.tool-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(171, 188, 214, 0.96);
+  box-shadow: 0 14px 24px rgba(51, 76, 128, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(239, 244, 251, 0.98));
+}
+
+.mode-trigger {
+  position: relative;
+  height: 38px;
+  padding: 0 0.92rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: #223146;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease;
+}
+
+.mode-trigger:hover {
+  transform: translateY(-1px);
+  border-color: rgba(166, 184, 211, 0.94);
+  box-shadow: 0 14px 26px rgba(52, 76, 128, 0.08);
+}
+
+.mode-trigger-mode {
+  background: linear-gradient(135deg, rgba(240, 246, 255, 1), rgba(248, 251, 255, 0.98));
+  color: #224168;
+}
+
+.mode-trigger-skill {
+  background: linear-gradient(135deg, rgba(242, 248, 239, 0.98), rgba(255, 250, 240, 0.98));
+  color: #2f4c40;
+}
+
+.knowledge-ask-trigger {
+  background: linear-gradient(135deg, rgba(232, 241, 255, 1), rgba(255, 248, 233, 0.98));
+  border-color: rgba(173, 190, 220, 0.95);
+  color: #173a6a;
+  box-shadow: 0 12px 22px rgba(71, 104, 168, 0.09);
+}
+
+.mode-dropdown,
+.knowledge-ask-dropdown,
+.skill-dropdown {
+  border-color: rgba(213, 220, 232, 0.92);
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 24px 44px rgba(24, 40, 75, 0.15);
+}
+
+.knowledge-ask-item,
+.mode-item,
+.skill-item {
+  border: 1px solid rgba(221, 227, 236, 0.9);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(245, 248, 252, 0.94));
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.knowledge-ask-item:hover,
+.mode-item:hover,
+.skill-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(177, 194, 220, 0.96);
+  box-shadow: 0 12px 22px rgba(52, 78, 130, 0.08);
+}
+
+.send-btn {
+  background: linear-gradient(135deg, #18345f 0%, #2a579f 100%);
+  box-shadow: 0 14px 28px rgba(34, 63, 121, 0.2);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    filter 0.18s ease;
+}
+
+.send-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 32px rgba(31, 62, 126, 0.25);
+  filter: saturate(1.05);
+}
+
+.logout-floating {
+  border-color: rgba(208, 216, 228, 0.86);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(16px);
+}
+
+.modal-mask {
+  background: rgba(20, 27, 42, 0.24);
+  backdrop-filter: blur(8px);
+}
+
+.modal-card {
+  border-color: rgba(219, 224, 234, 0.86);
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 28px 64px rgba(18, 32, 62, 0.2);
+}
+
+.hitl-item,
+.hitl-readonly-value,
+.field input,
+.field select,
+.text-btn,
+.solid-btn {
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+
+.field input,
+.field select {
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.field input:focus,
+.field select:focus {
+  box-shadow: 0 0 0 4px rgba(113, 148, 214, 0.12);
+}
+
+.solid-btn {
+  background: linear-gradient(135deg, #18345f 0%, #2857a0 100%);
+  border-color: #18345f;
+  box-shadow: 0 12px 24px rgba(32, 58, 112, 0.16);
+}
+
 @media (max-width: 960px) {
   .doubao-shell,
   .doubao-shell.collapsed {
@@ -2647,10 +3333,6 @@ onBeforeUnmount(() => {
 
   .sidebar {
     display: none;
-  }
-
-  .topbar {
-    grid-template-columns: 42px 1fr auto;
   }
 
   .top-right-actions {
