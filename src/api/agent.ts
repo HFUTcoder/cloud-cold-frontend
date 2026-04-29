@@ -4,16 +4,9 @@ import type {
   AgentStreamEvent,
   AgentStreamHandlers,
 } from '@/types/agent'
-
-const DEFAULT_API_BASE_URL = '/api'
+import { buildApiUrl } from '@/api/request'
 const AGENT_CALL_PATH = '/agent/call'
 const AGENT_RESUME_PATH = '/agent/resume'
-
-function buildApiUrl(path: string): string {
-  const configuredBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() ?? ''
-  const baseUrl = configuredBaseUrl || DEFAULT_API_BASE_URL
-  return `${baseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
-}
 
 function parseSseBlock(block: string): { event: string; data: string } | null {
   const lines = block.split('\n')

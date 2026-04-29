@@ -55,7 +55,10 @@ interface HitlArgumentEditor {
 }
 
 interface HitlArgumentSpecRecord {
+  name?: string
+  displayName?: string
   type?: string
+  required?: boolean
   defaultValue?: JsonValue
 }
 
@@ -64,6 +67,7 @@ interface HitlArgumentField {
   label: string
   type: 'string' | 'number' | 'boolean' | 'null'
   value: JsonPrimitive
+  required?: boolean
 }
 
 const chatRef = ref<HTMLElement | null>(null)
@@ -822,21 +826,88 @@ function getHitlArgumentFields(toolId: string): HitlArgumentField[] {
     return []
   }
 
+  const rootRecord = isJsonRecord(editor.value) ? editor.value : null
+  const argumentSpecs =
+    rootRecord && isJsonRecord(rootRecord.argumentSpecs)
+      ? (rootRecord.argumentSpecs as Record<string, HitlArgumentSpecRecord>)
+      : {}
+
   const allFields = flattenArgumentFields(editor.value)
   const hasStructuredArguments = allFields.some(
     (field) => field.path.startsWith('arguments.') || field.path.startsWith('arguments['),
   )
 
   if (hasStructuredArguments) {
-    return allFields
-      .filter((field) => field.path.startsWith('arguments.') || field.path.startsWith('arguments['))
-      .map((field) => ({
+    const structuredFields = allFields.filter(
+      (field) => field.path.startsWith('arguments.') || field.path.startsWith('arguments['),
+    )
+    const structuredFieldMap = new Map(structuredFields.map((field) => [field.path, field]))
+    const orderedFields: HitlArgumentField[] = []
+
+    for (const [argumentName, spec] of Object.entries(argumentSpecs)) {
+      const path = `arguments.${argumentName}`
+      const field = structuredFieldMap.get(path)
+      if (!field) {
+        continue
+      }
+      orderedFields.push({
         ...field,
-        label: field.label.replace(/^arguments(\.|\[)/, (_value, token: string) => (token === '[' ? '[' : '')),
-      }))
+        type: resolveHitlFieldType(field.value, spec),
+        label: resolveHitlArgumentLabel(argumentName, argumentSpecs),
+        required: Boolean(spec?.required),
+      })
+      structuredFieldMap.delete(path)
+    }
+
+    for (const field of structuredFieldMap.values()) {
+      const fallbackLabel = field.label.replace(/^arguments(\.|\[)/, (_value, token: string) => (token === '[' ? '[' : ''))
+      orderedFields.push({
+        ...field,
+        label: resolveHitlArgumentLabel(fallbackLabel, argumentSpecs),
+        required: false,
+      })
+    }
+
+    return orderedFields
   }
 
   return allFields.filter((field) => field.path !== 'skillName' && field.path !== 'scriptPath')
+}
+
+function resolveHitlFieldType(
+  value: JsonPrimitive,
+  spec?: HitlArgumentSpecRecord,
+): HitlArgumentField['type'] {
+  const typeHint = (spec?.type || '').trim().toLowerCase()
+  if (typeHint === 'number' || typeHint === 'integer' || typeHint === 'float' || typeHint === 'double') {
+    return 'number'
+  }
+  if (typeHint === 'boolean') {
+    return 'boolean'
+  }
+  if (value === null) {
+    return 'null'
+  }
+  if (typeof value === 'number') {
+    return 'number'
+  }
+  if (typeof value === 'boolean') {
+    return 'boolean'
+  }
+  return 'string'
+}
+
+function resolveHitlArgumentLabel(
+  fallbackLabel: string,
+  argumentSpecs: Record<string, HitlArgumentSpecRecord>,
+): string {
+  const topLevelKey = fallbackLabel.split('.')[0]?.replace(/\[.*$/, '') || fallbackLabel
+  const spec = argumentSpecs[topLevelKey]
+  if (!spec) {
+    return fallbackLabel
+  }
+  const displayName = (spec.displayName || spec.name || '').trim()
+  return displayName || fallbackLabel
 }
 
 function updateHitlArgumentField(toolId: string, field: HitlArgumentField, rawValue: string | boolean) {
@@ -847,8 +918,13 @@ function updateHitlArgumentField(toolId: string, field: HitlArgumentField, rawVa
 
   let nextValue: JsonPrimitive = rawValue as JsonPrimitive
   if (field.type === 'number') {
-    const numeric = Number(rawValue)
-    nextValue = Number.isNaN(numeric) ? 0 : numeric
+    const textValue = String(rawValue).trim()
+    if (!textValue) {
+      nextValue = null
+    } else {
+      const numeric = Number(textValue)
+      nextValue = Number.isNaN(numeric) ? null : numeric
+    }
   } else if (field.type === 'boolean') {
     nextValue = rawValue === true || rawValue === 'true'
   } else if (field.type === 'null') {
@@ -874,7 +950,34 @@ function serializeToolArguments(toolId: string): string {
   if (editor.parseError || editor.value === null) {
     throw new Error('存在无法解析的 arguments，请检查后再提交。')
   }
+  validateHitlArguments(editor.value)
   return JSON.stringify(editor.value)
+}
+
+function validateHitlArguments(value: JsonValue) {
+  if (!isJsonRecord(value)) {
+    return
+  }
+  const argumentSpecs =
+    isJsonRecord(value.argumentSpecs)
+      ? (value.argumentSpecs as Record<string, HitlArgumentSpecRecord>)
+      : {}
+  const argumentsRecord =
+    isJsonRecord(value.arguments)
+      ? (value.arguments as Record<string, JsonValue>)
+      : {}
+
+  for (const [argumentName, spec] of Object.entries(argumentSpecs)) {
+    if (!spec?.required) {
+      continue
+    }
+    const currentValue = argumentsRecord[argumentName]
+    const emptyString = typeof currentValue === 'string' && currentValue.trim() === ''
+    if (currentValue === null || currentValue === undefined || emptyString) {
+      const label = (spec.displayName || spec.name || argumentName).trim() || argumentName
+      throw new Error(`${label}不能为空，请补充后再提交。`)
+    }
+  }
 }
 
 function updateHitlFeedback(id: string, patch: Partial<PendingToolCall>) {
@@ -1692,7 +1795,7 @@ onBeforeUnmount(() => {
                     />
                     <input
                       v-else-if="field.type === 'number'"
-                      :value="String(field.value ?? 0)"
+                      :value="field.value === null ? '' : String(field.value)"
                       type="number"
                       @input="
                         updateHitlArgumentField(
@@ -2954,6 +3057,7 @@ onBeforeUnmount(() => {
 }
 
 .conversation-list-scroll {
+  padding-top: 0.18rem;
   padding-right: 0.25rem;
 }
 
