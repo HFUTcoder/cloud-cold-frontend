@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { DOCUMENT_INDEX_STATUS_LABELS, DOCUMENT_INDEX_STATUSES } from '@/constants/document'
 import { createKnowledge, deleteKnowledge, listMyKnowledgeByPage, updateKnowledge } from '@/api/knowledge'
 import {
   deleteDocument,
@@ -50,13 +51,18 @@ const selectedKnowledge = computed(() =>
   knowledgeList.value.find((item) => item.id === selectedKnowledgeId.value) ?? null,
 )
 const indexedCount = computed(
-  () => documents.value.filter((item) => item.indexStatus === 'INDEXED').length,
+  () => documents.value.filter((item) => item.indexStatus === DOCUMENT_INDEX_STATUSES.INDEXED).length,
 )
 const failedCount = computed(
-  () => documents.value.filter((item) => item.indexStatus === 'FAILED').length,
+  () => documents.value.filter((item) => item.indexStatus === DOCUMENT_INDEX_STATUSES.FAILED).length,
 )
 const pendingCount = computed(
-  () => documents.value.filter((item) => item.indexStatus === 'PENDING' || item.indexStatus === 'INDEXING').length,
+  () =>
+    documents.value.filter(
+      (item) =>
+        item.indexStatus === DOCUMENT_INDEX_STATUSES.PENDING ||
+        item.indexStatus === DOCUMENT_INDEX_STATUSES.INDEXING,
+    ).length,
 )
 const sortedDocuments = computed(() =>
   [...documents.value].sort((left, right) => {
@@ -371,25 +377,16 @@ function formatFileSize(size?: number) {
 }
 
 function statusLabel(status: DocumentVO['indexStatus']) {
-  switch (status) {
-    case 'INDEXED':
-      return '已就绪'
-    case 'INDEXING':
-      return '入库中'
-    case 'FAILED':
-      return '失败'
-    default:
-      return '待处理'
-  }
+  return DOCUMENT_INDEX_STATUS_LABELS[status] ?? DOCUMENT_INDEX_STATUS_LABELS[DOCUMENT_INDEX_STATUSES.PENDING]
 }
 
 function statusDescription(document: DocumentVO) {
   switch (document.indexStatus) {
-    case 'INDEXED':
+    case DOCUMENT_INDEX_STATUSES.INDEXED:
       return '文档已处理完成，可以在当前知识库中使用'
-    case 'INDEXING':
+    case DOCUMENT_INDEX_STATUSES.INDEXING:
       return `开始处理：${formatDateTime(document.indexStartTime)}`
-    case 'FAILED':
+    case DOCUMENT_INDEX_STATUSES.FAILED:
       return document.indexErrorMessage || '本次入库失败，请检查文件内容或稍后重试'
     default:
       return '文档已上传，正在准备中'
@@ -558,7 +555,10 @@ function statusDescription(document: DocumentVO) {
                       <span>{{ formatFileSize(document.fileSize) }}</span>
                       <span>上传于 {{ formatDateTime(document.createTime) }}</span>
                     </div>
-                    <div v-if="document.indexStatus === 'FAILED' && document.indexErrorMessage" class="document-error">
+                    <div
+                      v-if="document.indexStatus === DOCUMENT_INDEX_STATUSES.FAILED && document.indexErrorMessage"
+                      class="document-error"
+                    >
                       {{ document.indexErrorMessage }}
                     </div>
                   </div>

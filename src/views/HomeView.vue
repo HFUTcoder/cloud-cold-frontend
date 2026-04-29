@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { AGENT_MODE_LABELS, AGENT_MODES, type AgentMode } from '@/constants/agent'
 import KnowledgeWorkspace from '@/components/knowledge/KnowledgeWorkspace.vue'
 import { callAgentStream, resumeAgentStream } from '@/api/agent'
 import {
@@ -76,7 +77,7 @@ const skillMenuRef = ref<HTMLElement | null>(null)
 const knowledgeAskMenuRef = ref<HTMLElement | null>(null)
 const composerInputRef = ref<HTMLTextAreaElement | null>(null)
 const inputValue = ref('')
-const mode = ref<'fast' | 'thinking'>('fast')
+const mode = ref<AgentMode>(AGENT_MODES.FAST)
 const showModeMenu = ref(false)
 const sidebarCollapsed = ref(false)
 const knowledgeQaMode = ref(false)
@@ -139,14 +140,14 @@ const starterPrompts = [
   '给我一份高可维护的代码评审清单',
 ]
 
-const modeOptions: Array<{ label: string; value: 'fast' | 'thinking'; desc: string }> = [
-  { label: '快速', value: 'fast', desc: '适用于大部分情况' },
-  { label: '思考', value: 'thinking', desc: '擅长解决更难的问题' },
+const modeOptions: Array<{ label: string; value: AgentMode; desc: string }> = [
+  { label: AGENT_MODE_LABELS[AGENT_MODES.FAST], value: AGENT_MODES.FAST, desc: '适用于大部分情况' },
+  { label: AGENT_MODE_LABELS[AGENT_MODES.THINKING], value: AGENT_MODES.THINKING, desc: '擅长解决更难的问题' },
 ]
 
 const hasMessages = computed(() => messages.value.length > 0)
 const canSubmit = computed(() => inputValue.value.trim().length > 0 && !loading.value)
-const modeLabel = computed(() => (mode.value === 'fast' ? '快速' : '思考'))
+const modeLabel = computed(() => AGENT_MODE_LABELS[mode.value] ?? AGENT_MODE_LABELS[AGENT_MODES.FAST])
 const isLoggedIn = computed(() => currentUser.value !== null)
 const userLabel = computed(() => currentUser.value?.userName || currentUser.value?.userAccount || '')
 const activeConversationTitle = computed(() => {
@@ -344,7 +345,7 @@ async function toggleKnowledgeAskMenu() {
   await loadKnowledgeOptions()
 }
 
-function chooseMode(nextMode: 'fast' | 'thinking') {
+function chooseMode(nextMode: AgentMode) {
   mode.value = nextMode
   showModeMenu.value = false
 }

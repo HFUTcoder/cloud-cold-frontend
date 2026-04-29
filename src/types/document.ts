@@ -1,4 +1,4 @@
-export type DocumentIndexStatus = 'PENDING' | 'INDEXING' | 'INDEXED' | 'FAILED'
+import type { DocumentIndexStatus } from '@/constants/document'
 
 export interface DocumentVO {
   id: number

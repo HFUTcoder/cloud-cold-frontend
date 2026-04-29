@@ -1,0 +1,15 @@
+export const DOCUMENT_INDEX_STATUSES = {
+  PENDING: 'PENDING',
+  INDEXING: 'INDEXING',
+  INDEXED: 'INDEXED',
+  FAILED: 'FAILED',
+} as const
+
+export type DocumentIndexStatus = (typeof DOCUMENT_INDEX_STATUSES)[keyof typeof DOCUMENT_INDEX_STATUSES]
+
+export const DOCUMENT_INDEX_STATUS_LABELS: Record<DocumentIndexStatus, string> = {
+  [DOCUMENT_INDEX_STATUSES.PENDING]: '待处理',
+  [DOCUMENT_INDEX_STATUSES.INDEXING]: '入库中',
+  [DOCUMENT_INDEX_STATUSES.INDEXED]: '已就绪',
+  [DOCUMENT_INDEX_STATUSES.FAILED]: '失败',
+}

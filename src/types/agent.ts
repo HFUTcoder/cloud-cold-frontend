@@ -1,3 +1,5 @@
+import type { AgentMode } from '@/constants/agent'
+
 /**
  * 对应后端 AgentCallRequest
  */
@@ -9,7 +11,7 @@ export interface AgentCallRequest {
   /**
    * 工作模式
    */
-  mode: string
+  mode: AgentMode
   /**
    * 会话 id（可选）
    */
