@@ -22,7 +22,13 @@ export interface AgentResumeRequest {
   interruptId: string
 }
 
-export type AgentEventType = 'thinking_step' | 'assistant_delta' | 'final_answer' | 'hitl_interrupt' | 'error'
+export type AgentEventType =
+  | 'thinking_step'
+  | 'assistant_delta'
+  | 'final_answer'
+  | 'hitl_interrupt'
+  | 'knowledge_retrieval'
+  | 'error'
 
 export interface AgentThinkingStepPayload {
   stage?: string
@@ -48,6 +54,19 @@ export interface AgentFinalAnswerPayload {
   content?: string
 }
 
+export interface RetrievedKnowledgeImage {
+  imageId?: string
+  imageUrl?: string
+  pageNumber?: number
+  documentId?: string
+  documentName?: string
+}
+
+export interface AgentKnowledgeRetrievalPayload {
+  images?: RetrievedKnowledgeImage[]
+  count?: number
+}
+
 export interface AgentErrorPayload {
   message?: string
 }
@@ -56,7 +75,12 @@ export interface AgentStreamEvent {
   type: AgentEventType | string
   conversationId?: string
   interruptId?: string
-  data?: AgentThinkingStepPayload | AgentHitlInterruptPayload | AgentFinalAnswerPayload | AgentErrorPayload
+  data?:
+    | AgentThinkingStepPayload
+    | AgentHitlInterruptPayload
+    | AgentFinalAnswerPayload
+    | AgentKnowledgeRetrievalPayload
+    | AgentErrorPayload
 }
 
 export interface AgentStreamHandlers {

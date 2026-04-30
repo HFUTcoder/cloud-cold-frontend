@@ -42,6 +42,16 @@ export function updateConversationSkills(conversationId: string, selectedSkills:
   })
 }
 
+export function updateConversationKnowledge(conversationId: string, knowledgeId: number | null) {
+  return requestJson<boolean>('/chatConversation/update/knowledge', {
+    method: 'POST',
+    body: JSON.stringify({
+      conversationId,
+      knowledgeId,
+    }),
+  })
+}
+
 export function listHistoryByConversation(conversationId: string) {
   return requestJson<ChatMemoryHistory[]>(
     `/chatMemory/history/list/conversation?conversationId=${encodeURIComponent(conversationId)}`,

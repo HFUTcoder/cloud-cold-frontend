@@ -9,6 +9,7 @@ import {
   getConversation,
   listHistoryByConversation,
   listMyConversations,
+  updateConversationKnowledge,
   updateConversationSkills,
 } from '@/api/chat'
 import { getHitlCheckpoint, resolveHitlCheckpoint } from '@/api/hitl'
@@ -20,9 +21,11 @@ import type {
   AgentErrorPayload,
   AgentFinalAnswerPayload,
   AgentHitlInterruptPayload,
+  AgentKnowledgeRetrievalPayload,
   AgentStreamEvent,
   AgentThinkingStepPayload,
   PendingToolCall,
+  RetrievedKnowledgeImage,
 } from '@/types/agent'
 import type { ChatConversation, ChatMemoryHistory } from '@/types/chat'
 import type { HitlCheckpointResolveRequest } from '@/types/hitl'
@@ -45,6 +48,7 @@ interface ChatMessage {
   thinkingExpanded?: boolean
   thinkingDone?: boolean
   pending?: boolean
+  retrievedImages?: RetrievedKnowledgeImage[]
 }
 
 type JsonPrimitive = string | number | boolean | null
@@ -102,6 +106,9 @@ const hitlToolCalls = ref<PendingToolCall[]>([])
 const hitlFeedbacks = ref<PendingToolCall[]>([])
 const hitlArgumentEditors = ref<Record<string, HitlArgumentEditor>>({})
 const interruptedAssistantMessage = ref<ChatMessage | null>(null)
+const showRetrievedImagePreview = ref(false)
+const retrievedImagePreviewUrl = ref('')
+const retrievedImagePreviewTitle = ref('')
 
 const loginForm = ref({
   userAccount: '',
@@ -126,10 +133,13 @@ const skillListLoading = ref(false)
 const skillBindingLoading = ref(false)
 const showKnowledgeAskMenu = ref(false)
 const knowledgeAskListLoading = ref(false)
+const knowledgeBindingLoading = ref(false)
 const skills = ref<SkillMetadataVO[]>([])
 const knowledgeOptions = ref<KnowledgeVO[]>([])
 const hoveredSkillName = ref('')
 const selectedSkillName = ref('')
+const selectedKnowledgeId = ref<number | null>(null)
+const selectedKnowledgeName = ref('')
 
 const starterPrompts = [
   '如何利用 AI Agent 优化日常办公自动化流程？',
@@ -173,16 +183,6 @@ function resolveSelectedSkills(conversation: ChatConversation | undefined): stri
   if (Array.isArray(conversation.selectedSkillList) && conversation.selectedSkillList.length > 0) {
     return conversation.selectedSkillList
   }
-  if (conversation.selectedSkills) {
-    try {
-      const parsed = JSON.parse(conversation.selectedSkills)
-      if (Array.isArray(parsed)) {
-        return parsed.map((item) => String(item)).filter(Boolean)
-      }
-    } catch {
-      return []
-    }
-  }
   return []
 }
 
@@ -219,6 +219,7 @@ function appendAssistantMessage(): ChatMessage {
     thinkingExpanded: false,
     thinkingDone: false,
     pending: true,
+    retrievedImages: [],
   }
   messages.value.push(message)
   scrollToBottom()
@@ -252,6 +253,7 @@ function mapHistoryToMessages(historyList: ChatMemoryHistory[]): ChatMessage[] {
         thinkingPreviewSeq: 0,
         thinkingExpanded: false,
         thinkingDone: true,
+        retrievedImages: Array.isArray(item.retrievedImages) ? item.retrievedImages : [],
       })
     }
   }
@@ -262,22 +264,8 @@ function fillPrompt(prompt: string) {
   inputValue.value = prompt
 }
 
-function buildKnowledgeQuestionPrefix(knowledgeName: string) {
-  return `请根据${knowledgeName}知识库回答：`
-}
-
 function removeKnowledgeQuestionPrefix(text: string) {
   return text.replace(/^请根据(?:.+?)?知识库回答：/, '')
-}
-
-function applyKnowledgeQuestionPrefix(knowledgeName: string) {
-  const nextContent = removeKnowledgeQuestionPrefix(inputValue.value)
-  inputValue.value = `${buildKnowledgeQuestionPrefix(knowledgeName)}${nextContent}`
-  nextTick(() => {
-    composerInputRef.value?.focus()
-    const cursorPosition = inputValue.value.length
-    composerInputRef.value?.setSelectionRange(cursorPosition, cursorPosition)
-  })
 }
 
 async function startNewChat() {
@@ -288,6 +276,9 @@ async function startNewChat() {
   loading.value = false
   inputValue.value = ''
   messages.value = []
+  selectedSkillName.value = ''
+  selectedKnowledgeId.value = null
+  selectedKnowledgeName.value = ''
 
   if (!isLoggedIn.value) {
     activeConversationId.value = ''
@@ -298,7 +289,6 @@ async function startNewChat() {
     const conversationId = await createConversation()
     activeConversationId.value = conversationId
     await loadConversations(false)
-    selectedSkillName.value = ''
   } catch (error) {
     authError.value = error instanceof Error ? error.message : '新建会话失败，请稍后再试。'
   }
@@ -382,9 +372,77 @@ async function loadKnowledgeOptions() {
   }
 }
 
-function chooseKnowledgeQuestion(knowledgeName: string) {
-  applyKnowledgeQuestionPrefix(knowledgeName)
-  showKnowledgeAskMenu.value = false
+async function bindKnowledge(knowledge: KnowledgeVO) {
+  if (!isLoggedIn.value) {
+    openAuthModal('login')
+    return
+  }
+  if (knowledgeBindingLoading.value) {
+    return
+  }
+
+  if (!activeConversationId.value) {
+    try {
+      activeConversationId.value = await createConversation()
+      await loadConversations(false)
+    } catch (error) {
+      authError.value = error instanceof Error ? error.message : '创建会话失败，请稍后再试。'
+      return
+    }
+  }
+
+  knowledgeBindingLoading.value = true
+  authError.value = ''
+  try {
+    await updateConversationKnowledge(activeConversationId.value, knowledge.id)
+    selectedKnowledgeId.value = knowledge.id
+    selectedKnowledgeName.value = knowledge.knowledgeName
+    inputValue.value = removeKnowledgeQuestionPrefix(inputValue.value)
+    conversations.value = conversations.value.map((item) =>
+      item.conversationId === activeConversationId.value
+        ? {
+            ...item,
+            selectedKnowledgeId: knowledge.id,
+            selectedKnowledgeName: knowledge.knowledgeName,
+          }
+        : item,
+    )
+    showKnowledgeAskMenu.value = false
+    nextTick(() => {
+      composerInputRef.value?.focus()
+    })
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '绑定知识库失败，请稍后再试。'
+  } finally {
+    knowledgeBindingLoading.value = false
+  }
+}
+
+async function unbindKnowledge() {
+  if (!activeConversationId.value || knowledgeBindingLoading.value) {
+    return
+  }
+  knowledgeBindingLoading.value = true
+  authError.value = ''
+  try {
+    await updateConversationKnowledge(activeConversationId.value, null)
+    selectedKnowledgeId.value = null
+    selectedKnowledgeName.value = ''
+    conversations.value = conversations.value.map((item) =>
+      item.conversationId === activeConversationId.value
+        ? {
+            ...item,
+            selectedKnowledgeId: undefined,
+            selectedKnowledgeName: undefined,
+          }
+        : item,
+    )
+    showKnowledgeAskMenu.value = false
+  } catch (error) {
+    authError.value = error instanceof Error ? error.message : '解除知识库绑定失败，请稍后再试。'
+  } finally {
+    knowledgeBindingLoading.value = false
+  }
 }
 
 async function bindSkill(skillName: string) {
@@ -516,6 +574,8 @@ async function confirmLogout() {
     conversations.value = []
     activeConversationId.value = ''
     selectedSkillName.value = ''
+    selectedKnowledgeId.value = null
+    selectedKnowledgeName.value = ''
     authModal.value = 'none'
     startNewChat()
   } catch (error) {
@@ -530,6 +590,8 @@ async function loadConversations(keepCurrentSelection = true) {
     conversations.value = []
     activeConversationId.value = ''
     selectedSkillName.value = ''
+    selectedKnowledgeId.value = null
+    selectedKnowledgeName.value = ''
     return
   }
 
@@ -544,11 +606,15 @@ async function loadConversations(keepCurrentSelection = true) {
         activeConversationId.value = ''
         messages.value = []
         selectedSkillName.value = ''
+        selectedKnowledgeId.value = null
+        selectedKnowledgeName.value = ''
       } else {
         await syncActiveConversationDetail(activeConversationId.value)
       }
     } else if (!keepCurrentSelection) {
       selectedSkillName.value = ''
+      selectedKnowledgeId.value = null
+      selectedKnowledgeName.value = ''
     }
   } finally {
     conversationLoading.value = false
@@ -558,6 +624,8 @@ async function loadConversations(keepCurrentSelection = true) {
 async function syncActiveConversationDetail(conversationId: string) {
   if (!conversationId) {
     selectedSkillName.value = ''
+    selectedKnowledgeId.value = null
+    selectedKnowledgeName.value = ''
     return
   }
   try {
@@ -566,9 +634,13 @@ async function syncActiveConversationDetail(conversationId: string) {
       item.conversationId === conversationId ? { ...item, ...detail } : item,
     )
     selectedSkillName.value = resolveSelectedSkills(detail)[0] || ''
+    selectedKnowledgeId.value = detail.selectedKnowledgeId ?? null
+    selectedKnowledgeName.value = detail.selectedKnowledgeName || ''
   } catch {
     const active = conversations.value.find((item) => item.conversationId === conversationId)
     selectedSkillName.value = resolveSelectedSkills(active)[0] || ''
+    selectedKnowledgeId.value = active?.selectedKnowledgeId ?? null
+    selectedKnowledgeName.value = active?.selectedKnowledgeName || ''
   }
 }
 
@@ -626,6 +698,8 @@ async function confirmDeleteConversation() {
       activeConversationId.value = ''
       messages.value = []
       selectedSkillName.value = ''
+      selectedKnowledgeId.value = null
+      selectedKnowledgeName.value = ''
     }
     pendingDeleteConversationId.value = ''
     authModal.value = 'none'
@@ -1069,6 +1143,12 @@ function handleAgentEvent(event: AgentStreamEvent, assistantMessage: ChatMessage
       void openHitlModal(currentInterruptId.value, payload, assistantMessage)
       break
     }
+    case 'knowledge_retrieval': {
+      const payload = eventData as AgentKnowledgeRetrievalPayload
+      assistantMessage.retrievedImages = Array.isArray(payload.images) ? payload.images : []
+      scrollToBottom()
+      break
+    }
     case 'error': {
       const payload = eventData as AgentErrorPayload
       const message = payload.message || '调用失败'
@@ -1085,6 +1165,21 @@ function handleAgentEvent(event: AgentStreamEvent, assistantMessage: ChatMessage
       }
       break
   }
+}
+
+function openRetrievedImagePreview(image: RetrievedKnowledgeImage) {
+  if (!image.imageUrl) {
+    return
+  }
+  retrievedImagePreviewUrl.value = image.imageUrl
+  retrievedImagePreviewTitle.value = image.documentName || ''
+  showRetrievedImagePreview.value = true
+}
+
+function closeRetrievedImagePreview() {
+  showRetrievedImagePreview.value = false
+  retrievedImagePreviewUrl.value = ''
+  retrievedImagePreviewTitle.value = ''
 }
 
 function mergeFinalAnswerChunk(fullContent: string) {
@@ -1205,7 +1300,7 @@ async function resolveAndResume() {
 }
 
 async function submitQuestion() {
-  const question = inputValue.value.trim()
+  const question = removeKnowledgeQuestionPrefix(inputValue.value.trim()).trim()
   if (!question || loading.value) {
     return
   }
@@ -1461,6 +1556,8 @@ async function fetchCurrentUser() {
     conversations.value = []
     activeConversationId.value = ''
     selectedSkillName.value = ''
+    selectedKnowledgeId.value = null
+    selectedKnowledgeName.value = ''
   }
 }
 
@@ -1574,6 +1671,36 @@ onBeforeUnmount(() => {
               <div class="message-bubble">
                 <p class="role-tag">{{ message.role === 'user' ? '你' : '助手' }}</p>
                 <template v-if="message.role === 'assistant'">
+                  <div
+                    v-if="message.retrievedImages && message.retrievedImages.length > 0"
+                    class="retrieved-image-panel"
+                  >
+                    <div class="retrieved-image-head">
+                      <span class="retrieved-image-title">知识库命中图片</span>
+                      <span class="retrieved-image-count">{{ message.retrievedImages.length }} 张</span>
+                    </div>
+                    <div class="retrieved-image-grid">
+                      <button
+                        v-for="image in message.retrievedImages"
+                        :key="image.imageId || image.imageUrl"
+                        class="retrieved-image-card"
+                        type="button"
+                        @click="openRetrievedImagePreview(image)"
+                      >
+                        <div class="retrieved-image-frame">
+                          <img
+                            v-if="image.imageUrl"
+                            :src="image.imageUrl"
+                            :alt="image.documentName || '知识库命中图片'"
+                            class="retrieved-image"
+                          />
+                        </div>
+                        <div class="retrieved-image-body">
+                          <p v-if="image.documentName" class="retrieved-image-doc">{{ image.documentName }}</p>
+                        </div>
+                      </button>
+                    </div>
+                  </div>
                   <div v-if="message.thinkingContent" class="thinking-box">
                     <button class="thinking-header" type="button" @click="toggleThinking(message)">
                       <span class="thinking-title">{{ message.thinkingDone ? '已完成思考' : '思考中...' }}</span>
@@ -1622,8 +1749,13 @@ onBeforeUnmount(() => {
 
       <footer v-if="!knowledgeQaMode" class="composer-wrap">
         <div class="composer">
-          <div v-if="selectedSkillName" class="selected-skill-chip">
-            已绑定 Skill：{{ selectedSkillName }}
+          <div v-if="selectedSkillName || selectedKnowledgeName" class="selected-binding-chips">
+            <div v-if="selectedSkillName" class="selected-skill-chip">
+              已绑定 Skill：{{ selectedSkillName }}
+            </div>
+            <div v-if="selectedKnowledgeName" class="selected-knowledge-chip">
+              已绑定知识库：{{ selectedKnowledgeName }}
+            </div>
           </div>
           <textarea
             ref="composerInputRef"
@@ -1705,6 +1837,14 @@ onBeforeUnmount(() => {
                 </button>
 
                 <div v-if="showKnowledgeAskMenu" class="knowledge-ask-dropdown">
+                  <button
+                    class="knowledge-ask-item unbind"
+                    type="button"
+                    :disabled="!selectedKnowledgeId || knowledgeBindingLoading || !activeConversationId"
+                    @click="unbindKnowledge"
+                  >
+                    {{ knowledgeBindingLoading ? '处理中...' : '解除绑定' }}
+                  </button>
                   <div v-if="knowledgeAskListLoading" class="knowledge-ask-hint">加载中...</div>
                   <div v-else-if="knowledgeOptions.length === 0" class="knowledge-ask-hint">
                     暂无知识库，请先创建
@@ -1714,7 +1854,8 @@ onBeforeUnmount(() => {
                     :key="knowledge.id"
                     type="button"
                     class="knowledge-ask-item"
-                    @click="chooseKnowledgeQuestion(knowledge.knowledgeName)"
+                    :class="{ active: selectedKnowledgeId === knowledge.id }"
+                    @click="bindKnowledge(knowledge)"
                   >
                     <span class="knowledge-ask-item-title">{{ knowledge.knowledgeName }}</span>
                     <span class="knowledge-ask-item-meta">{{ knowledge.documentCount }} 份文档</span>
@@ -1848,6 +1989,26 @@ onBeforeUnmount(() => {
           <button class="solid-btn" type="button" :disabled="agentRunStatus === 'resolving'" @click="resolveAndResume">
             {{ agentRunStatus === 'resolving' ? '提交中...' : '提交并继续' }}
           </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showRetrievedImagePreview" class="modal-mask" @click="closeRetrievedImagePreview">
+      <div class="preview-card retrieved-image-preview-card" @click.stop>
+        <div class="preview-head">
+          <div>
+            <p class="retrieved-image-preview-kicker">知识库命中图片</p>
+            <h3 v-if="retrievedImagePreviewTitle">{{ retrievedImagePreviewTitle }}</h3>
+          </div>
+          <button class="top-icon-btn" type="button" @click="closeRetrievedImagePreview">×</button>
+        </div>
+        <div class="retrieved-image-preview-body">
+          <img
+            v-if="retrievedImagePreviewUrl"
+            :src="retrievedImagePreviewUrl"
+            :alt="retrievedImagePreviewTitle || '知识库命中图片'"
+            class="retrieved-image-preview"
+          />
         </div>
       </div>
     </div>
@@ -2364,6 +2525,120 @@ onBeforeUnmount(() => {
   font-size: 0.95rem;
 }
 
+.retrieved-image-panel {
+  border: 1px solid rgba(217, 225, 239, 0.9);
+  border-radius: 0.95rem;
+  background: linear-gradient(180deg, rgba(248, 251, 255, 0.96), rgba(241, 246, 255, 0.94));
+  margin-bottom: 0.72rem;
+  padding: 0.75rem;
+}
+
+.retrieved-image-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.68rem;
+}
+
+.retrieved-image-title {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: #2a4268;
+}
+
+.retrieved-image-count {
+  font-size: 0.75rem;
+  color: #6e7f98;
+}
+
+.retrieved-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 220px));
+  justify-content: center;
+  gap: 0.6rem;
+}
+
+.retrieved-image-card {
+  display: grid;
+  gap: 0.42rem;
+  color: inherit;
+  border: 1px solid rgba(203, 214, 232, 0.9);
+  border-radius: 0.88rem;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 0.44rem;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
+  width: 100%;
+  max-width: 220px;
+}
+
+.retrieved-image-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(154, 179, 220, 0.96);
+  box-shadow: 0 16px 26px rgba(51, 78, 130, 0.08);
+}
+
+.retrieved-image-frame {
+  aspect-ratio: 4 / 3;
+  border-radius: 0.62rem;
+  overflow: hidden;
+  background: #eef3fb;
+}
+
+.retrieved-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.retrieved-image-body {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.retrieved-image-doc {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #314967;
+}
+
+.retrieved-image-preview-card {
+  width: min(960px, calc(100% - 2rem));
+  max-height: 86vh;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 0.9rem;
+}
+
+.retrieved-image-preview-kicker {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #6d7f99;
+  letter-spacing: 0.08em;
+}
+
+.retrieved-image-preview-body {
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  border-radius: 1rem;
+  background: #eef3fb;
+}
+
+.retrieved-image-preview {
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  display: block;
+}
+
 .thinking-box {
   border: 1px solid #e1e1e6;
   border-radius: 0.75rem;
@@ -2466,10 +2741,17 @@ onBeforeUnmount(() => {
   padding: 0.66rem 0.78rem 0.58rem;
 }
 
-.selected-skill-chip {
+.selected-binding-chips {
   position: absolute;
   top: -1.1rem;
   left: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+.selected-skill-chip,
+.selected-knowledge-chip {
   border: 1px solid #dcdde4;
   background: #fff;
   border-radius: 999px;
@@ -2609,6 +2891,14 @@ onBeforeUnmount(() => {
 
 .knowledge-ask-item:hover {
   background: #edf3ff;
+}
+
+.knowledge-ask-item.active {
+  background: #e7efff;
+}
+
+.knowledge-ask-item.unbind {
+  color: #8c2f39;
 }
 
 .knowledge-ask-item-title {
@@ -3260,7 +3550,8 @@ onBeforeUnmount(() => {
   transform: translateY(-1px);
 }
 
-.selected-skill-chip {
+.selected-skill-chip,
+.selected-knowledge-chip {
   border-color: rgba(212, 219, 233, 0.92);
   background: rgba(255, 255, 255, 0.94);
   color: #53637c;
@@ -3369,6 +3660,11 @@ onBeforeUnmount(() => {
   box-shadow: 0 12px 22px rgba(52, 78, 130, 0.08);
 }
 
+.knowledge-ask-item.active {
+  border-color: rgba(145, 171, 220, 0.98);
+  background: linear-gradient(180deg, rgba(236, 243, 255, 0.98), rgba(227, 237, 255, 0.96));
+}
+
 .send-btn {
   background: linear-gradient(135deg, #18345f 0%, #2a579f 100%);
   box-shadow: 0 14px 28px rgba(34, 63, 121, 0.2);
@@ -3473,7 +3769,7 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
-  .selected-skill-chip {
+  .selected-binding-chips {
     left: 0.45rem;
   }
 
