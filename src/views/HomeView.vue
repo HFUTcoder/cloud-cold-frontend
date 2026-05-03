@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { AGENT_MODE_LABELS, AGENT_MODES, type AgentMode } from '@/constants/agent'
 import KnowledgeWorkspace from '@/components/knowledge/KnowledgeWorkspace.vue'
+import PetMemoryWidget from '@/components/pet/PetMemoryWidget.vue'
 import { callAgentStream, resumeAgentStream } from '@/api/agent'
 import {
   createConversation,
@@ -176,6 +177,13 @@ const hoveredSkill = computed(() => {
   return skills.value.find((item) => item.name === name)
 })
 
+const orderedListPattern = /^\s*\d+\.\s+/
+const unorderedListPattern = /^\s*[-*+]\s+/
+const headingPattern = /^(#{1,6})\s+(.*)$/
+const fencePattern = /^```([\w-]*)\s*$/
+const quotePattern = /^\s*>\s?/
+const hrPattern = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/
+
 function resolveSelectedSkills(conversation: ChatConversation | undefined): string[] {
   if (!conversation) {
     return []
@@ -184,6 +192,170 @@ function resolveSelectedSkills(conversation: ChatConversation | undefined): stri
     return conversation.selectedSkillList
   }
   return []
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function sanitizeUrl(url: string): string {
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return ''
+  }
+  if (/^(https?:|mailto:)/i.test(trimmed)) {
+    return trimmed
+  }
+  return ''
+}
+
+function renderMarkdownInline(source: string): string {
+  const placeholders: string[] = []
+  const store = (html: string) => {
+    const token = `@@MD_TOKEN_${placeholders.length}@@`
+    placeholders.push(html)
+    return token
+  }
+
+  let output = source
+
+  output = output.replace(/`([^`\n]+)`/g, (_, code: string) => store(`<code>${escapeHtml(code)}</code>`))
+  output = output.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, url: string) => {
+    const safeUrl = sanitizeUrl(url)
+    if (!safeUrl) {
+      return `${label} (${url})`
+    }
+    return store(
+      `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noreferrer noopener">${escapeHtml(label)}</a>`,
+    )
+  })
+
+  output = escapeHtml(output)
+  output = output.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  output = output.replace(/__([^_]+)__/g, '<strong>$1</strong>')
+  output = output.replace(/~~([^~]+)~~/g, '<del>$1</del>')
+  output = output.replace(/(^|[^\w\\])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+  output = output.replace(/(^|[^\w\\])_([^_\n]+)_(?!_)/g, '$1<em>$2</em>')
+
+  return output.replace(/@@MD_TOKEN_(\d+)@@/g, (_, index: string) => placeholders[Number(index)] ?? '')
+}
+
+function collectParagraph(lines: string[], start: number): { html: string; nextIndex: number } {
+  const buffer: string[] = []
+  let index = start
+
+  while (index < lines.length) {
+    const line = lines[index]
+    if (!line.trim()) {
+      break
+    }
+    if (
+      fencePattern.test(line) ||
+      headingPattern.test(line) ||
+      orderedListPattern.test(line) ||
+      unorderedListPattern.test(line) ||
+      quotePattern.test(line) ||
+      hrPattern.test(line)
+    ) {
+      break
+    }
+    buffer.push(line.trimEnd())
+    index += 1
+  }
+
+  const html = `<p>${buffer.map((line) => renderMarkdownInline(line)).join('<br />')}</p>`
+  return { html, nextIndex: index }
+}
+
+function renderMarkdown(source: string | undefined): string {
+  if (!source?.trim()) {
+    return ''
+  }
+
+  const lines = source.replace(/\r\n?/g, '\n').split('\n')
+  const blocks: string[] = []
+
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index]
+
+    if (!line.trim()) {
+      index += 1
+      continue
+    }
+
+    const fenceMatch = line.match(fencePattern)
+    if (fenceMatch) {
+      const language = fenceMatch[1]?.trim()
+      const codeLines: string[] = []
+      index += 1
+      while (index < lines.length && !/^```/.test(lines[index])) {
+        codeLines.push(lines[index])
+        index += 1
+      }
+      if (index < lines.length) {
+        index += 1
+      }
+      const languageClass = language ? ` class="language-${escapeHtml(language)}"` : ''
+      blocks.push(`<pre><code${languageClass}>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+      continue
+    }
+
+    const headingMatch = line.match(headingPattern)
+    if (headingMatch) {
+      const level = Math.min(headingMatch[1].length, 6)
+      blocks.push(`<h${level}>${renderMarkdownInline(headingMatch[2].trim())}</h${level}>`)
+      index += 1
+      continue
+    }
+
+    if (hrPattern.test(line)) {
+      blocks.push('<hr />')
+      index += 1
+      continue
+    }
+
+    if (quotePattern.test(line)) {
+      const quoteLines: string[] = []
+      while (index < lines.length && quotePattern.test(lines[index])) {
+        quoteLines.push(lines[index].replace(quotePattern, ''))
+        index += 1
+      }
+      blocks.push(`<blockquote>${renderMarkdown(quoteLines.join('\n'))}</blockquote>`)
+      continue
+    }
+
+    if (unorderedListPattern.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && unorderedListPattern.test(lines[index])) {
+        items.push(`<li>${renderMarkdownInline(lines[index].replace(unorderedListPattern, '').trim())}</li>`)
+        index += 1
+      }
+      blocks.push(`<ul>${items.join('')}</ul>`)
+      continue
+    }
+
+    if (orderedListPattern.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && orderedListPattern.test(lines[index])) {
+        items.push(`<li>${renderMarkdownInline(lines[index].replace(orderedListPattern, '').trim())}</li>`)
+        index += 1
+      }
+      blocks.push(`<ol>${items.join('')}</ol>`)
+      continue
+    }
+
+    const paragraph = collectParagraph(lines, index)
+    blocks.push(paragraph.html)
+    index = paragraph.nextIndex
+  }
+
+  return blocks.join('')
 }
 
 function scrollToBottom() {
@@ -1718,10 +1890,14 @@ onBeforeUnmount(() => {
                       {{ message.thinkingContent }}
                     </div>
                   </div>
-                  <p v-if="message.finalContent" class="message-content">{{ message.finalContent }}</p>
+                  <div
+                    v-if="message.finalContent"
+                    class="message-content markdown-content"
+                    v-html="renderMarkdown(message.finalContent)"
+                  />
                 </template>
                 <template v-else>
-                  <p class="message-content">{{ message.content }}</p>
+                  <div class="message-content markdown-content" v-html="renderMarkdown(message.content)" />
                 </template>
                 <p v-if="message.pending" class="typing">正在生成...</p>
               </div>
@@ -1889,7 +2065,6 @@ onBeforeUnmount(() => {
     <div v-if="showHitlModal" class="modal-mask">
       <div class="modal-card hitl-card" @click.stop>
         <h3>人工确认执行</h3>
-        <p class="logout-desc">请确认以下工具调用，再继续 Agent 执行。</p>
         <div class="hitl-list">
           <div v-for="tool in hitlFeedbacks" :key="tool.id" class="hitl-item">
             <p class="hitl-desc">{{ displayHitlDescription(tool.description) }}</p>
@@ -2082,6 +2257,8 @@ onBeforeUnmount(() => {
         </template>
       </div>
     </div>
+
+    <PetMemoryWidget :current-user="currentUser" @request-login="openAuthModal('login')" />
   </div>
 </template>
 
@@ -2520,9 +2697,115 @@ onBeforeUnmount(() => {
 }
 
 .message-content {
-  white-space: pre-wrap;
   line-height: 1.6;
   font-size: 0.95rem;
+}
+
+.markdown-content :deep(*) {
+  box-sizing: border-box;
+}
+
+.markdown-content :deep(p) {
+  margin: 0;
+}
+
+.markdown-content :deep(p + p) {
+  margin-top: 0.8rem;
+}
+
+.markdown-content :deep(h1),
+.markdown-content :deep(h2),
+.markdown-content :deep(h3),
+.markdown-content :deep(h4),
+.markdown-content :deep(h5),
+.markdown-content :deep(h6) {
+  margin: 1rem 0 0.5rem;
+  line-height: 1.3;
+  font-weight: 700;
+  color: #18304f;
+}
+
+.markdown-content :deep(h1) {
+  font-size: 1.35rem;
+}
+
+.markdown-content :deep(h2) {
+  font-size: 1.2rem;
+}
+
+.markdown-content :deep(h3) {
+  font-size: 1.08rem;
+}
+
+.markdown-content :deep(ul),
+.markdown-content :deep(ol) {
+  margin: 0.75rem 0;
+  padding-left: 1.4rem;
+}
+
+.markdown-content :deep(li + li) {
+  margin-top: 0.32rem;
+}
+
+.markdown-content :deep(blockquote) {
+  margin: 0.85rem 0;
+  padding: 0.2rem 0 0.2rem 0.85rem;
+  border-left: 3px solid rgba(105, 135, 191, 0.45);
+  color: #56657b;
+  background: rgba(244, 248, 255, 0.7);
+  border-radius: 0 0.7rem 0.7rem 0;
+}
+
+.markdown-content :deep(pre) {
+  margin: 0.85rem 0;
+  padding: 0.85rem 0.95rem;
+  overflow-x: auto;
+  border-radius: 0.9rem;
+  background: #172235;
+  color: #eef4ff;
+  box-shadow: inset 0 0 0 1px rgba(118, 144, 191, 0.18);
+}
+
+.markdown-content :deep(code) {
+  font-family: 'SFMono-Regular', 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 0.88em;
+}
+
+.markdown-content :deep(:not(pre) > code) {
+  padding: 0.12rem 0.35rem;
+  border-radius: 0.45rem;
+  background: rgba(28, 45, 77, 0.08);
+  color: #1e3960;
+}
+
+.markdown-content :deep(pre code) {
+  display: block;
+  white-space: pre;
+}
+
+.markdown-content :deep(a) {
+  color: #2d67bc;
+  text-decoration: underline;
+  text-decoration-color: rgba(45, 103, 188, 0.35);
+  text-underline-offset: 0.16rem;
+}
+
+.markdown-content :deep(strong) {
+  font-weight: 700;
+}
+
+.markdown-content :deep(em) {
+  font-style: italic;
+}
+
+.markdown-content :deep(del) {
+  text-decoration-thickness: 1.5px;
+}
+
+.markdown-content :deep(hr) {
+  margin: 1rem 0;
+  border: none;
+  border-top: 1px solid rgba(190, 201, 220, 0.8);
 }
 
 .retrieved-image-panel {
@@ -3085,13 +3368,14 @@ onBeforeUnmount(() => {
   border-radius: 1rem;
   background: #fff;
   box-shadow: 0 18px 45px rgba(0, 0, 0, 0.18);
-  padding: 1rem;
+  padding: 0.9rem;
 }
 
 .modal-card h3 {
   font-size: 1rem;
   color: #202024;
-  margin-bottom: 0.8rem;
+  margin-bottom: 0.55rem;
+  line-height: 1.2;
 }
 
 .hitl-card {
@@ -3102,13 +3386,13 @@ onBeforeUnmount(() => {
   max-height: 360px;
   overflow: auto;
   display: grid;
-  gap: 0.65rem;
+  gap: 0.5rem;
 }
 
 .hitl-item {
   border: 1px solid #e6e6eb;
   border-radius: 0.75rem;
-  padding: 0.65rem;
+  padding: 0.56rem 0.6rem;
 }
 
 .hitl-name {
@@ -3118,16 +3402,17 @@ onBeforeUnmount(() => {
 }
 
 .hitl-desc {
-  margin-top: 0.2rem;
-  margin-bottom: 0.35rem;
+  margin-top: 0;
+  margin-bottom: 0.28rem;
   font-size: 0.8rem;
   color: #6a7280;
+  line-height: 1.45;
 }
 
 .hitl-meta {
-  margin: 0 0 0.45rem;
+  margin: 0 0 0.35rem;
   display: grid;
-  gap: 0.15rem;
+  gap: 0.12rem;
   font-size: 0.78rem;
   color: #52525b;
 }
@@ -3167,8 +3452,8 @@ onBeforeUnmount(() => {
 
 .field {
   display: grid;
-  gap: 0.35rem;
-  margin-bottom: 0.7rem;
+  gap: 0.28rem;
+  margin-bottom: 0.55rem;
 }
 
 .field span {
@@ -3214,7 +3499,7 @@ onBeforeUnmount(() => {
 }
 
 .modal-actions {
-  margin-top: 0.3rem;
+  margin-top: 0.18rem;
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
