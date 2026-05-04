@@ -17,9 +17,9 @@ export interface UserLongTermMemory {
 export interface UserPetState {
   enabled: boolean
   petName: string
-  petMood: 'idle' | 'learning' | 'updated' | 'disabled' | string
+  petMood: 'idle' | 'learning' | 'updated' | string
   memoryCount: number
-  pendingRounds: number
+  pendingConversationCount: number
   lastLearnedAt?: string | null
   memoryHighlights: string[]
   recentMemories: UserLongTermMemory[]

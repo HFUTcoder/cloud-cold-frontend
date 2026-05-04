@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { message } from 'ant-design-vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { LoginUserVO } from '@/types/user'
 import type { UserLongTermMemory, UserPetState } from '@/types/userMemory'
@@ -8,7 +9,6 @@ import {
   listUserMemories,
   rebuildUserMemories,
   renameUserPet,
-  switchUserMemory,
 } from '@/api/userMemory'
 
 const props = defineProps<{
@@ -20,6 +20,10 @@ const emit = defineEmits<{
 }>()
 
 const STORAGE_KEY = 'cloud-cold-pet-position'
+const FAB_SIZE = 66
+const EDGE_PADDING = 12
+const PANEL_GAP = 14
+const ACTION_LOCK_MS = 1000
 const panelOpen = ref(false)
 const dragging = ref(false)
 const loading = ref(false)
@@ -36,18 +40,50 @@ let dragOffsetY = 0
 const isLoggedIn = computed(() => props.currentUser !== null)
 const petMood = computed(() => state.value?.petMood || 'idle')
 const petName = computed(() => state.value?.petName || '小冷')
-const learningLabel = computed(() => {
-  if (!state.value?.enabled) {
-    return '长期记忆已关闭'
+const widgetStyle = computed(() => ({
+  left: `${position.value.x}px`,
+  top: `${position.value.y}px`,
+}))
+const panelStyle = computed(() => {
+  if (typeof window === 'undefined') {
+    return {
+      left: `${FAB_SIZE + PANEL_GAP}px`,
+      top: '0px',
+    }
   }
+
+  const panelWidth = Math.min(360, window.innerWidth - EDGE_PADDING * 2)
+  const panelHeight = Math.min(window.innerHeight * 0.7, 680)
+  const preferredRight = position.value.x + FAB_SIZE + PANEL_GAP
+  const canPlaceRight = preferredRight + panelWidth <= window.innerWidth - EDGE_PADDING
+  const left = canPlaceRight
+    ? FAB_SIZE + PANEL_GAP
+    : -panelWidth - PANEL_GAP
+
+  const minTopOffset = EDGE_PADDING - position.value.y
+  const maxTopOffset = window.innerHeight - EDGE_PADDING - panelHeight - position.value.y
+  const top = Math.min(Math.max(0, minTopOffset), maxTopOffset)
+
+  return {
+    left: `${left}px`,
+    top: `${top}px`,
+  }
+})
+const learningLabel = computed(() => {
   if (petMood.value === 'learning') {
-    return `正在整理记忆，已累计 ${state.value?.pendingRounds ?? 0} 轮新的对话`
+    return `正在整理记忆，还有 ${state.value?.pendingConversationCount ?? 0} 个会话待处理`
   }
   if (petMood.value === 'updated') {
     return '刚刚学到了新东西'
   }
-  return '陪你一起慢慢熟悉项目'
+  return ''
 })
+
+const memoryTypeLabelMap: Record<string, string> = {
+  USER_PROFILE: '用户信息',
+  FACT: '客观事实',
+  PREFERENCE: '行为偏好',
+}
 
 watch(
   () => props.currentUser?.id ?? null,
@@ -111,7 +147,7 @@ function onPointerDown(event: PointerEvent) {
   dragging.value = true
   dragPointerId = event.pointerId
   dragOffsetX = event.clientX - position.value.x
-  dragOffsetY = window.innerHeight - position.value.y - event.clientY
+  dragOffsetY = event.clientY - position.value.y
   window.addEventListener('pointermove', handlePointerMove)
   window.addEventListener('pointerup', handlePointerUp)
   window.addEventListener('pointercancel', handlePointerUp)
@@ -121,8 +157,14 @@ function handlePointerMove(event: PointerEvent) {
   if (!dragging.value) {
     return
   }
-  const nextX = Math.min(Math.max(12, event.clientX - dragOffsetX), Math.max(12, window.innerWidth - 84))
-  const nextY = Math.min(Math.max(12, window.innerHeight - event.clientY - dragOffsetY), Math.max(12, window.innerHeight - 84))
+  const nextX = Math.min(
+    Math.max(EDGE_PADDING, event.clientX - dragOffsetX),
+    Math.max(EDGE_PADDING, window.innerWidth - FAB_SIZE - EDGE_PADDING),
+  )
+  const nextY = Math.min(
+    Math.max(EDGE_PADDING, event.clientY - dragOffsetY),
+    Math.max(EDGE_PADDING, window.innerHeight - FAB_SIZE - EDGE_PADDING),
+  )
   position.value = { x: nextX, y: nextY }
 }
 
@@ -154,36 +196,6 @@ function restorePosition() {
   }
 }
 
-async function handleToggleEnabled() {
-  if (!state.value) {
-    return
-  }
-  actionLoading.value = true
-  feedback.value = ''
-  try {
-    await switchUserMemory(!state.value.enabled)
-    await refreshState()
-  } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '切换长期记忆失败，请稍后再试。'
-  } finally {
-    actionLoading.value = false
-  }
-}
-
-async function handleRebuild() {
-  actionLoading.value = true
-  feedback.value = ''
-  try {
-    await rebuildUserMemories()
-    feedback.value = '已经开始重新整理长期记忆。'
-    await refreshState()
-  } catch (error) {
-    feedback.value = error instanceof Error ? error.message : '重建长期记忆失败，请稍后再试。'
-  } finally {
-    actionLoading.value = false
-  }
-}
-
 async function handleRename() {
   const nextName = petNameDraft.value.trim()
   if (!nextName) {
@@ -202,6 +214,33 @@ async function handleRename() {
   }
 }
 
+async function handleRebuild() {
+  const start = Date.now()
+  actionLoading.value = true
+  feedback.value = ''
+  try {
+    await rebuildUserMemories()
+    feedback.value = '已经开始主动整理长期记忆。'
+    await refreshState()
+  } catch (error) {
+    const nextMessage = error instanceof Error ? error.message : '主动重建长期记忆失败，请稍后再试。'
+    if (nextMessage.includes('5 分钟内最多主动重建一次长期记忆')) {
+      void message.warning({
+        content: nextMessage,
+        duration: 2,
+      })
+    } else {
+      feedback.value = nextMessage
+    }
+  } finally {
+    const elapsed = Date.now() - start
+    if (elapsed < ACTION_LOCK_MS) {
+      await new Promise((resolve) => window.setTimeout(resolve, ACTION_LOCK_MS - elapsed))
+    }
+    actionLoading.value = false
+  }
+}
+
 async function handleDeleteMemory(memoryId: string) {
   actionLoading.value = true
   feedback.value = ''
@@ -214,12 +253,15 @@ async function handleDeleteMemory(memoryId: string) {
     actionLoading.value = false
   }
 }
+function formatMemoryType(memoryType: string) {
+  return memoryTypeLabelMap[memoryType] ?? memoryType
+}
 </script>
 
 <template>
   <div
     class="pet-widget"
-    :style="{ right: `${position.x}px`, bottom: `${position.y}px` }"
+    :style="widgetStyle"
   >
     <button
       class="pet-fab"
@@ -229,18 +271,23 @@ async function handleDeleteMemory(memoryId: string) {
       @click="openPanel"
     >
       <span class="pet-core">
-        <span class="pet-face">◕</span>
+        <span class="pet-cloud">
+          <span class="pet-cloud-eye pet-cloud-eye-left"></span>
+          <span class="pet-cloud-eye pet-cloud-eye-right"></span>
+          <span class="pet-cloud-blush pet-cloud-blush-left"></span>
+          <span class="pet-cloud-blush pet-cloud-blush-right"></span>
+          <span class="pet-cloud-mouth"></span>
+        </span>
       </span>
-      <span class="pet-badge" v-if="state?.memoryCount">{{ state.memoryCount }}</span>
     </button>
 
     <transition name="pet-panel-fade">
-      <section v-if="panelOpen" class="pet-panel">
+      <section v-if="panelOpen" class="pet-panel" :style="panelStyle">
         <div class="pet-panel-head">
           <div>
             <p class="pet-kicker">个人宠物</p>
             <h3>{{ petName }}</h3>
-            <p class="pet-subtitle">{{ learningLabel }}</p>
+            <p v-if="learningLabel" class="pet-subtitle">{{ learningLabel }}</p>
           </div>
           <button class="pet-close" type="button" @click="panelOpen = false">×</button>
         </div>
@@ -256,17 +303,14 @@ async function handleDeleteMemory(memoryId: string) {
               <strong>{{ state?.memoryCount ?? 0 }}</strong>
             </div>
             <div class="pet-stat">
-              <span>待学习轮次</span>
-              <strong>{{ state?.pendingRounds ?? 0 }}</strong>
+              <span>待处理会话</span>
+              <strong>{{ state?.pendingConversationCount ?? 0 }}</strong>
             </div>
           </div>
 
           <div class="pet-actions">
-            <button class="pet-action" type="button" :disabled="actionLoading" @click="handleToggleEnabled">
-              {{ state?.enabled ? '关闭记忆' : '开启记忆' }}
-            </button>
             <button class="pet-action primary" type="button" :disabled="actionLoading" @click="handleRebuild">
-              手动学习
+              主动学习
             </button>
           </div>
 
@@ -296,7 +340,7 @@ async function handleDeleteMemory(memoryId: string) {
             <div v-else class="pet-memory-list">
               <article v-for="memory in memories.slice(0, 8)" :key="memory.id" class="pet-memory-card">
                 <div class="pet-memory-top">
-                  <span class="pet-memory-type">{{ memory.memoryType }}</span>
+                  <span class="pet-memory-type">{{ formatMemoryType(memory.memoryType) }}</span>
                   <button class="pet-memory-delete" type="button" :disabled="actionLoading" @click="handleDeleteMemory(memory.id)">
                     删除
                   </button>
@@ -323,9 +367,8 @@ async function handleDeleteMemory(memoryId: string) {
 .pet-widget {
   position: fixed;
   z-index: 55;
-  display: grid;
-  justify-items: end;
-  gap: 0.85rem;
+  width: 66px;
+  height: 66px;
 }
 
 .pet-fab {
@@ -376,42 +419,95 @@ async function handleDeleteMemory(memoryId: string) {
 }
 
 .pet-core {
-  width: 40px;
+  width: 46px;
   height: 40px;
-  border-radius: 1rem;
-  background: rgba(255, 255, 255, 0.14);
   display: grid;
   place-items: center;
-  backdrop-filter: blur(10px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
-.pet-face {
-  color: #fff7ea;
-  font-size: 1.6rem;
-  line-height: 1;
-  transform: translateY(-1px);
-}
-
-.pet-badge {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  min-width: 26px;
-  height: 26px;
-  padding: 0 0.4rem;
+.pet-cloud {
+  position: relative;
+  width: 40px;
+  height: 24px;
   border-radius: 999px;
-  background: linear-gradient(135deg, #ffd176, #ff9f57);
-  color: #52310f;
-  font-size: 0.78rem;
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 10px 18px rgba(214, 128, 43, 0.24);
+  background: linear-gradient(180deg, #ffffff, #eef6ff);
+  box-shadow:
+    0 8px 18px rgba(29, 53, 102, 0.18),
+    inset 0 -2px 0 rgba(191, 214, 243, 0.72);
+}
+
+.pet-cloud::before,
+.pet-cloud::after {
+  content: '';
+  position: absolute;
+  bottom: 7px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffffff, #eef6ff);
+}
+
+.pet-cloud::before {
+  left: 4px;
+  width: 15px;
+  height: 15px;
+}
+
+.pet-cloud::after {
+  right: 4px;
+  width: 18px;
+  height: 18px;
+}
+
+.pet-cloud-eye,
+.pet-cloud-blush,
+.pet-cloud-mouth {
+  position: absolute;
+  z-index: 1;
+}
+
+.pet-cloud-eye {
+  top: 11px;
+  width: 4px;
+  height: 6px;
+  border-radius: 999px;
+  background: #35527f;
+}
+
+.pet-cloud-eye-left {
+  left: 13px;
+}
+
+.pet-cloud-eye-right {
+  right: 13px;
+}
+
+.pet-cloud-blush {
+  top: 15px;
+  width: 7px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 173, 194, 0.75);
+}
+
+.pet-cloud-blush-left {
+  left: 6px;
+}
+
+.pet-cloud-blush-right {
+  right: 6px;
+}
+
+.pet-cloud-mouth {
+  left: 50%;
+  top: 16px;
+  width: 8px;
+  height: 4px;
+  border-bottom: 2px solid #35527f;
+  border-radius: 0 0 999px 999px;
+  transform: translateX(-50%);
 }
 
 .pet-panel {
+  position: absolute;
   width: min(360px, calc(100vw - 2rem));
   max-height: min(70vh, 680px);
   overflow: auto;
@@ -440,11 +536,11 @@ async function handleDeleteMemory(memoryId: string) {
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.8rem;
-  margin-bottom: 0.95rem;
+  margin-bottom: 0.8rem;
 }
 
 .pet-kicker {
-  margin: 0 0 0.18rem;
+  margin: 0 0 0.12rem;
   font-size: 0.72rem;
   font-weight: 700;
   color: #7b8aa3;
@@ -458,7 +554,7 @@ async function handleDeleteMemory(memoryId: string) {
 }
 
 .pet-subtitle {
-  margin: 0.25rem 0 0;
+  margin: 0.22rem 0 0;
   font-size: 0.82rem;
   color: #65748c;
   line-height: 1.45;
@@ -485,7 +581,7 @@ async function handleDeleteMemory(memoryId: string) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.62rem;
-  margin-bottom: 0.85rem;
+  margin-bottom: 0.78rem;
 }
 
 .pet-stat {

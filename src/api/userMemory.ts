@@ -22,13 +22,6 @@ export function rebuildUserMemories() {
   })
 }
 
-export function switchUserMemory(enabled: boolean) {
-  return requestJson<boolean>('/userMemory/switch', {
-    method: 'POST',
-    body: JSON.stringify({ enabled }),
-  })
-}
-
 export function renameUserPet(petName: string) {
   return requestJson<boolean>('/userMemory/rename', {
     method: 'POST',

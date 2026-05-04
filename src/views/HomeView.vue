@@ -1750,14 +1750,15 @@ onBeforeUnmount(() => {
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-icon" aria-label="Cloud Cold">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M7.4 17h9.2a4 4 0 0 0 .1-8a5 5 0 0 0-9.7 1.3A3.6 3.6 0 0 0 7.4 17z"
-              fill="currentColor"
-            />
-          </svg>
+          <span class="brand-cloud">
+            <span class="brand-cloud-eye brand-cloud-eye-left"></span>
+            <span class="brand-cloud-eye brand-cloud-eye-right"></span>
+            <span class="brand-cloud-blush brand-cloud-blush-left"></span>
+            <span class="brand-cloud-blush brand-cloud-blush-right"></span>
+            <span class="brand-cloud-mouth"></span>
+          </span>
         </div>
-        <div>
+        <div class="brand-copy">
           <p class="brand-title">Cloud Cold</p>
           <p class="brand-subtitle">Made By ShenChen</p>
         </div>
@@ -2302,33 +2303,34 @@ onBeforeUnmount(() => {
 .brand {
   display: flex;
   align-items: center;
-  gap: 0.7rem;
-  padding: 0.35rem;
+  gap: 0.82rem;
+  padding: 0.45rem 0.42rem 0.6rem;
 }
 
 .brand-icon {
-  width: 2rem;
-  height: 2rem;
-  border-radius: 0.7rem;
-  background: #111;
-  color: #fff;
+  width: 2.55rem;
+  height: 2.55rem;
+  border-radius: 0.95rem;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(239, 246, 255, 0.86));
   display: grid;
   place-items: center;
+  border: 1px solid rgba(217, 227, 240, 0.92);
 }
 
-.brand-icon svg {
-  width: 1.2rem;
-  height: 1.2rem;
+.brand-copy {
+  min-width: 0;
 }
 
 .brand-title {
-  font: 700 1rem/1.1 'Avenir Next', 'PingFang SC', sans-serif;
+  margin: 0;
+  font: 700 1.02rem/1.1 'Avenir Next', 'PingFang SC', sans-serif;
 }
 
 .brand-subtitle {
-  margin-top: 0.12rem;
+  margin: 0.2rem 0 0;
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.74rem;
+  line-height: 1.45;
 }
 
 .knowledge-chat-btn,
@@ -3585,12 +3587,13 @@ onBeforeUnmount(() => {
 
 .brand {
   position: relative;
-  padding: 0.35rem 0.2rem 0.5rem;
+  padding: 0.4rem 0.3rem 0.68rem;
 }
 
 .brand-icon {
-  background: linear-gradient(135deg, #17335f 0%, #2856a0 100%);
-  box-shadow: 0 14px 26px rgba(28, 55, 110, 0.22);
+  box-shadow:
+    0 14px 28px rgba(28, 55, 110, 0.14),
+    inset 0 -2px 0 rgba(198, 216, 241, 0.78);
 }
 
 .brand-title {
@@ -3600,6 +3603,84 @@ onBeforeUnmount(() => {
 
 .brand-subtitle {
   color: #7988a3;
+}
+
+.brand-cloud {
+  position: relative;
+  width: 1.75rem;
+  height: 1.02rem;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffffff, #eef6ff);
+}
+
+.brand-cloud::before,
+.brand-cloud::after {
+  content: '';
+  position: absolute;
+  bottom: 0.2rem;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffffff, #eef6ff);
+}
+
+.brand-cloud::before {
+  left: 0.18rem;
+  width: 0.64rem;
+  height: 0.64rem;
+}
+
+.brand-cloud::after {
+  right: 0.16rem;
+  width: 0.76rem;
+  height: 0.76rem;
+}
+
+.brand-cloud-eye,
+.brand-cloud-blush,
+.brand-cloud-mouth {
+  position: absolute;
+  z-index: 1;
+}
+
+.brand-cloud-eye {
+  top: 0.46rem;
+  width: 0.12rem;
+  height: 0.2rem;
+  border-radius: 999px;
+  background: #37517d;
+}
+
+.brand-cloud-eye-left {
+  left: 0.56rem;
+}
+
+.brand-cloud-eye-right {
+  right: 0.56rem;
+}
+
+.brand-cloud-blush {
+  top: 0.63rem;
+  width: 0.28rem;
+  height: 0.14rem;
+  border-radius: 999px;
+  background: rgba(255, 174, 196, 0.8);
+}
+
+.brand-cloud-blush-left {
+  left: 0.26rem;
+}
+
+.brand-cloud-blush-right {
+  right: 0.26rem;
+}
+
+.brand-cloud-mouth {
+  left: 50%;
+  top: 0.62rem;
+  width: 0.34rem;
+  height: 0.16rem;
+  border-bottom: 2px solid #37517d;
+  border-radius: 0 0 999px 999px;
+  transform: translateX(-50%);
 }
 
 .knowledge-chat-btn,
