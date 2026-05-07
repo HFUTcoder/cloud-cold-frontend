@@ -1228,7 +1228,11 @@ function validateHitlArguments(value: JsonValue) {
 }
 
 function updateHitlFeedback(id: string, patch: Partial<PendingToolCall>) {
-  hitlFeedbacks.value = hitlFeedbacks.value.map((item) => (item.id === id ? { ...item, ...patch } : item))
+  hitlFeedbacks.value = hitlFeedbacks.value.map((item) => (buildHitlToolKey(item.id) === id ? { ...item, ...patch } : item))
+}
+
+function buildHitlToolKey(toolId: string): string {
+  return `${currentInterruptId.value}:${toolId}`
 }
 
 function displayHitlDescription(description?: string): string {
@@ -1270,7 +1274,7 @@ async function openHitlModal(interruptId: string, payload: AgentHitlInterruptPay
     result: 'APPROVED',
   }))
   hitlArgumentEditors.value = Object.fromEntries(
-    hitlFeedbacks.value.map((tool) => [tool.id, parseToolArguments(tool.arguments)]),
+    hitlFeedbacks.value.map((tool) => [buildHitlToolKey(tool.id), parseToolArguments(tool.arguments)]),
   )
   interruptedAssistantMessage.value = assistantMessage
   assistantMessage.pending = false
@@ -1413,6 +1417,7 @@ async function resolveAndResume() {
     authError.value = '当前没有可处理的中断任务。'
     return
   }
+  const submittedInterruptId = currentInterruptId.value
   const assistantMessage = interruptedAssistantMessage.value
   if (!assistantMessage) {
     authError.value = '会话状态异常，请重新发起提问。'
@@ -1422,11 +1427,11 @@ async function resolveAndResume() {
   try {
     agentRunStatus.value = 'resolving'
     const payload: HitlCheckpointResolveRequest = {
-      interruptId: currentInterruptId.value,
+      interruptId: submittedInterruptId,
       feedbacks: hitlFeedbacks.value.map((item) => ({
         id: item.id,
         name: item.name,
-        arguments: serializeToolArguments(item.id),
+        arguments: serializeToolArguments(buildHitlToolKey(item.id)),
         result: item.result || 'APPROVED',
         description: item.description || '',
       })),
@@ -1456,13 +1461,16 @@ async function resolveAndResume() {
     await waitForStreamDrain()
     assistantMessage.pending = false
     assistantMessage.thinkingDone = true
+    activeAssistantMessage.value = null
+    controller.value = null
+    if (currentInterruptId.value && currentInterruptId.value !== submittedInterruptId) {
+      return
+    }
     interruptedAssistantMessage.value = null
     currentInterruptId.value = ''
     hitlToolCalls.value = []
     hitlFeedbacks.value = []
     hitlArgumentEditors.value = {}
-    activeAssistantMessage.value = null
-    controller.value = null
     agentRunStatus.value = 'finished'
     void loadConversations(false)
   } catch (error) {
@@ -2067,17 +2075,17 @@ onBeforeUnmount(() => {
       <div class="modal-card hitl-card" @click.stop>
         <h3>人工确认执行</h3>
         <div class="hitl-list">
-          <div v-for="tool in hitlFeedbacks" :key="tool.id" class="hitl-item">
+          <div v-for="tool in hitlFeedbacks" :key="buildHitlToolKey(tool.id)" class="hitl-item">
             <p class="hitl-desc">{{ displayHitlDescription(tool.description) }}</p>
-            <div class="hitl-meta" v-if="getLockedToolMeta(tool.id).skillName">
-              <p v-if="getLockedToolMeta(tool.id).skillName">技能：{{ getLockedToolMeta(tool.id).skillName }}</p>
+            <div class="hitl-meta" v-if="getLockedToolMeta(buildHitlToolKey(tool.id)).skillName">
+              <p v-if="getLockedToolMeta(buildHitlToolKey(tool.id)).skillName">技能：{{ getLockedToolMeta(buildHitlToolKey(tool.id)).skillName }}</p>
             </div>
             <label class="field">
               <span>处理结果</span>
               <select
                 :value="tool.result || 'APPROVED'"
                 @change="
-                  updateHitlFeedback(tool.id, {
+                  updateHitlFeedback(buildHitlToolKey(tool.id), {
                     result: ($event.target as HTMLSelectElement).value as PendingToolCall['result'],
                   })
                 "
@@ -2087,14 +2095,14 @@ onBeforeUnmount(() => {
                 <option value="EDIT">修改参数后执行</option>
               </select>
             </label>
-            <p v-if="hitlArgumentEditors[tool.id]?.parseError" class="error-tip hitl-error-inline">
-              {{ hitlArgumentEditors[tool.id]?.parseError }}
+            <p v-if="hitlArgumentEditors[buildHitlToolKey(tool.id)]?.parseError" class="error-tip hitl-error-inline">
+              {{ hitlArgumentEditors[buildHitlToolKey(tool.id)]?.parseError }}
             </p>
             <div v-else class="hitl-arg-grid">
-              <template v-if="getHitlArgumentFields(tool.id).length > 0">
+              <template v-if="getHitlArgumentFields(buildHitlToolKey(tool.id)).length > 0">
                 <label
-                  v-for="field in getHitlArgumentFields(tool.id)"
-                  :key="`${tool.id}-${field.path}`"
+                  v-for="field in getHitlArgumentFields(buildHitlToolKey(tool.id))"
+                  :key="`${buildHitlToolKey(tool.id)}-${field.path}`"
                   class="field hitl-field"
                 >
                   <span>{{ field.label }}</span>
@@ -2105,7 +2113,7 @@ onBeforeUnmount(() => {
                       type="text"
                       @input="
                         updateHitlArgumentField(
-                          tool.id,
+                          buildHitlToolKey(tool.id),
                           field,
                           ($event.target as HTMLInputElement).value,
                         )
@@ -2117,7 +2125,7 @@ onBeforeUnmount(() => {
                       type="number"
                       @input="
                         updateHitlArgumentField(
-                          tool.id,
+                          buildHitlToolKey(tool.id),
                           field,
                           ($event.target as HTMLInputElement).value,
                         )
@@ -2128,7 +2136,7 @@ onBeforeUnmount(() => {
                       :value="String(field.value)"
                       @change="
                         updateHitlArgumentField(
-                          tool.id,
+                          buildHitlToolKey(tool.id),
                           field,
                           ($event.target as HTMLSelectElement).value === 'true',
                         )
@@ -2144,7 +2152,7 @@ onBeforeUnmount(() => {
                       placeholder="留空表示 null"
                       @input="
                         updateHitlArgumentField(
-                          tool.id,
+                          buildHitlToolKey(tool.id),
                           field,
                           ($event.target as HTMLInputElement).value,
                         )
