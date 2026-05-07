@@ -39,7 +39,7 @@ let dragOffsetY = 0
 
 const isLoggedIn = computed(() => props.currentUser !== null)
 const petMood = computed(() => state.value?.petMood || 'idle')
-const petName = computed(() => state.value?.petName || '小冷')
+const petName = computed(() => state.value?.petName || '')
 const widgetStyle = computed(() => ({
   left: `${position.value.x}px`,
   top: `${position.value.y}px`,
@@ -181,6 +181,10 @@ function persistPosition() {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(position.value))
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(min, value), Math.max(min, max))
+}
+
 function restorePosition() {
   const raw = window.localStorage.getItem(STORAGE_KEY)
   if (!raw) {
@@ -189,7 +193,10 @@ function restorePosition() {
   try {
     const parsed = JSON.parse(raw) as { x?: number; y?: number }
     if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-      position.value = { x: parsed.x, y: parsed.y }
+      position.value = {
+        x: clamp(parsed.x, EDGE_PADDING, window.innerWidth - FAB_SIZE - EDGE_PADDING),
+        y: clamp(parsed.y, EDGE_PADDING, window.innerHeight - FAB_SIZE - EDGE_PADDING),
+      }
     }
   } catch {
     // ignore invalid local cache
