@@ -68,7 +68,11 @@ export interface AgentKnowledgeRetrievalPayload {
 }
 
 export interface AgentErrorPayload {
+  /** 错误码，对齐后端 ErrorCode 枚举（如 50000 = SYSTEM_ERROR） */
+  code?: number
   message?: string
+  /** 错误详情，可能包含堆栈或上下文 */
+  detail?: string
 }
 
 export interface AgentStreamEvent {

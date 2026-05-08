@@ -33,7 +33,7 @@ export function deleteConversation(payload: ChatConversationDeleteRequest) {
 }
 
 export function updateConversationSkills(conversationId: string, selectedSkills: string[]) {
-  return requestJson<boolean>('/chatConversation/update/skills', {
+  return requestJson<string>('/chatConversation/update/skills', {
     method: 'POST',
     body: JSON.stringify({
       conversationId,
@@ -43,7 +43,7 @@ export function updateConversationSkills(conversationId: string, selectedSkills:
 }
 
 export function updateConversationKnowledge(conversationId: string, knowledgeId: number | null) {
-  return requestJson<boolean>('/chatConversation/update/knowledge', {
+  return requestJson<string>('/chatConversation/update/knowledge', {
     method: 'POST',
     body: JSON.stringify({
       conversationId,

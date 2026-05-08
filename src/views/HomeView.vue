@@ -143,12 +143,12 @@ const selectedKnowledgeId = ref<number | null>(null)
 const selectedKnowledgeName = ref('')
 
 const starterPrompts = [
-  '如何利用 AI Agent 优化日常办公自动化流程？',
-  '解释过程模式在项目管理中的作用',
-  '帮我规划一份新的前端项目结构',
-  '解释这段报错并给出修复方案',
-  '把接口文档转换成前端调用代码',
-  '给我一份高可维护的代码评审清单',
+  '帮我总结一下今天的待办事项',
+  '如何优化我的工作流程，提高效率？',
+  '帮我整理一下最近的会议纪要',
+  '有什么好用的工具可以提升日常工作效率？',
+  '帮我分析一下这个项目的关键风险点',
+  '给我推荐一些提升专注力的方法',
 ]
 
 const modeOptions: Array<{ label: string; value: AgentMode; desc: string }> = [
@@ -623,8 +623,13 @@ async function bindSkill(skillName: string) {
     return
   }
   if (!activeConversationId.value) {
-    authError.value = '请先新建会话或发送消息后再绑定 skill。'
-    return
+    try {
+      activeConversationId.value = await createConversation()
+      await loadConversations(false)
+    } catch (error) {
+      authError.value = error instanceof Error ? error.message : '创建会话失败，请稍后再试。'
+      return
+    }
   }
   if (skillBindingLoading.value) {
     return
@@ -1915,7 +1920,7 @@ onBeforeUnmount(() => {
 
           <template v-else>
             <div class="empty-state">
-              <h2>有什么我能帮你的吗？</h2>
+              <h2>我是最懂你的小云助理</h2>
               <div class="suggestion-grid">
                 <button
                   v-for="prompt in starterPrompts"
