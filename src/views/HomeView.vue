@@ -154,6 +154,7 @@ const starterPrompts = [
 const modeOptions: Array<{ label: string; value: AgentMode; desc: string }> = [
   { label: AGENT_MODE_LABELS[AGENT_MODES.FAST], value: AGENT_MODES.FAST, desc: '适用于大部分情况' },
   { label: AGENT_MODE_LABELS[AGENT_MODES.THINKING], value: AGENT_MODES.THINKING, desc: '擅长解决更难的问题' },
+  { label: AGENT_MODE_LABELS[AGENT_MODES.EXPERT], value: AGENT_MODES.EXPERT, desc: '多智能体协作，并行执行' },
 ]
 
 const hasMessages = computed(() => messages.value.length > 0)
