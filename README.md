@@ -1,17 +1,17 @@
-# Cloud-Code 小云 AI 助理 ✨
-
 <div align="center">
+
+# Cloud-Code 小云 AI 助理 ✨
 
 **Cloud-Code 小云 AI 助理** — 前端应用
 
 会话式 AI 对话平台，集成知识库工作台与长期记忆 / 宠物记忆浮层
 
-![Vue](https://img.shields.io/badge/Vue-3.5.13-4FC08D?style=flat-square&logo=vuedotjs&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?style=flat-square&logo=typescript&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-6.2-646CFF?style=flat-square&logo=vite&logoColor=white)
-![Ant Design Vue](https://img.shields.io/badge/Ant%20Design%20Vue-4.2-1677FF?style=flat-square&logo=antdesign&logoColor=white)
-![Pinia](https://img.shields.io/badge/Pinia-3.0-FFD859?style=flat-square&logo=vue&logoColor=black)
-![Vue Router](https://img.shields.io/badge/Vue%20Router-4.5-4FC08D?style=flat-square&logo=vuedotjs&logoColor=white)
+![Vue](https://img.shields.io/badge/Vue-3.5.13-4FC08D?logo=vuedotjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-6.2-646CFF?logo=vite&logoColor=white)
+![Ant Design Vue](https://img.shields.io/badge/Ant%20Design%20Vue-4.2-1677FF?logo=antdesign&logoColor=white)
+![Pinia](https://img.shields.io/badge/Pinia-3.0-FFD859?logo=vue&logoColor=black)
+![Vue Router](https://img.shields.io/badge/Vue%20Router-4.5-4FC08D?logo=vuedotjs&logoColor=white)
 
 </div>
 
@@ -19,7 +19,8 @@
 
 | 特性 | 说明 |
 |------|------|
-| 🤖 Agent 对话 | SSE 流式问答，展示思考过程、最终回答和知识库命中图片 |
+| 🤖 Agent 对话 | SSE 流式问答，支持 fast / thinking / expert 三种模式，展示思考过程、最终回答和知识库命中图片 |
+| 🧩 Multi-Agent 模式 | Expert 模式对应后端 Multi-Agent 协调者，多智能体协作并行执行 |
 | 📚 知识库工作台 | 创建、编辑知识库，上传 PDF，预览原文件，查看入库状态 |
 | ✋ HITL 审批 | 弹窗审批，支持批准 / 拒绝 / 修改参数后继续执行 |
 | 🐾 宠物记忆 | 可拖拽浮层，展示宠物状态和长期记忆，支持重命名、重建、删除 |
@@ -32,8 +33,8 @@
 
 - SSE 流式输出，`fetch + getReader + TextDecoder` 手动解析 `text/event-stream`（非 EventSource）
 - 处理全部 6 种 SSE 事件：`thinking_step`、`assistant_delta`、`final_answer`、`hitl_interrupt`、`knowledge_retrieval`、`error`
-- `HomeView.vue`（1500+ 行）包含完整 Agent 逻辑：流解析、思考步骤展示、客户端 Markdown 渲染、知识库图片回显
-- 首页只暴露 `fast` 和 `thinking` 两种模式（`modeOptions` 数组），`expert` 保留在常量中但不可选
+- `HomeView.vue` 包含完整 Agent 逻辑：流解析、思考步骤展示、客户端 Markdown 渲染、知识库图片回显
+- 首页暴露全部三种 Agent 模式：`fast`（快速模式）、`thinking`（思考模式）、`expert`（多智能体协作，并行执行），通过下拉菜单切换
 
 ### HITL 审批流程
 
@@ -53,7 +54,7 @@
 
 ### 宠物记忆浮层
 
-- `PetMemoryWidget.vue`（797 行）：右下角可拖拽 FAB 按钮 + 滑出面板
+- `PetMemoryWidget.vue`：右下角可拖拽 FAB 按钮 + 滑出面板
 - FAB 位置通过 `localStorage` 键 `cloud-cold-pet-position` 持久化，恢复时有视口边界 clamp
 - 面板展示：宠物名称（可改名）、情绪动画、记忆统计、主动学习按钮、最近记忆列表（最多 8 条）、删除记忆
 - 宠物情绪通过 CSS class 驱动动画：`learning`（pulse）、`updated`（saturate）、`idle`（默认）
@@ -122,13 +123,17 @@ src
 ├── assets/                      # 全局样式（main.css、base.css）
 ├── components/
 │   ├── knowledge/               # 知识库工作台（KnowledgeWorkspace.vue）
-│   ├── pet/                     # 宠物记忆浮层（PetMemoryWidget.vue，797 行）
+│   ├── pet/                     # 宠物记忆浮层（PetMemoryWidget.vue）
 │   └── icons/                   # SVG 图标组件
 ├── constants/
-│   ├── agent.ts                 # AGENT_MODES、AGENT_MODE_LABELS
+│   ├── agent.ts                 # AGENT_MODES（fast / thinking / expert）、AGENT_MODE_LABELS
 │   └── document.ts              # DOCUMENT_INDEX_STATUSES、DOCUMENT_INDEX_STATUS_LABELS
+├── layouts/
+│   └── BasicLayout.vue          # 布局占位组件（当前未使用）
 ├── router/
 │   └── index.ts                 # 路由配置（/ → HomeView，/about → AboutView）
+├── stores/
+│   └── counter.ts               # Pinia 示例 store（非主链路）
 ├── types/
 │   ├── agent.ts                 # AgentStreamEvent 等流式事件类型
 │   ├── chat.ts                  # ChatConversation、ChatMemoryHistory
@@ -161,7 +166,7 @@ src
 
 - **路由**：`/` 是业务首页，`/about` 是脚手架示例页，非业务页面
 - **知识库工作台**：首页内嵌面板，非独立 `/knowledge` 路由
-- **Agent 模式**：首页只暴露 `fast` 和 `thinking`，`expert` 保留在常量中但不在 UI 展示
+- **Agent 模式**：首页暴露全部三种模式（`fast` / `thinking` / `expert`），`expert` 描述为"多智能体协作，并行执行"，对应后端 `CoordinatorAgent`
 - **Skill 绑定**：首页只做单 Skill 绑定，后端支持多 Skill 不等同前端已支持多选
 - **知识库绑定**：会自动创建会话；Skill 绑定不会
 - **文档上传**：当前仅允许 PDF，扩展格式需同步后端 `DocumentReaderStrategy`
@@ -176,4 +181,3 @@ src
 - [docs/development.md](docs/development.md) — 本地开发、请求地址、启动、验证、联调
 - [docs/design-docs/ref-frontend-architecture.md](docs/design-docs/ref-frontend-architecture.md) — 参考架构
 - [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md) — 组件、请求、SSE、样式模式
-

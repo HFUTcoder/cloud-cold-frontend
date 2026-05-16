@@ -20,9 +20,8 @@
 
 - 默认后端：`http://localhost:8081/api`
 - 环境覆盖：`VITE_API_BASE_URL`
-- Vite 代理：`/api -> http://localhost:8081`
-- 环境文件：`.env`、`.env.local`、`.env.[mode]`、`.env.[mode].local`
-- Vite 会自动加载当前 mode 对应的环境文件，不依赖额外启动脚本
+- Vite 代理：`/api → http://localhost:8081`
+- 环境文件：`.env`、`.env.local`、`.env.[mode]`、`.env.[mode].local`（当前仓库未提交 .env 文件，本地按需创建）
 
 请求地址、代理和联调细节见 [docs/development.md](docs/development.md)。
 
@@ -52,6 +51,7 @@
 | 宠物名称 | `petName`（Redis `user_memory:pet_name:{userId}`） |
 | 宠物情绪 | `petMood`：`learning` / `updated` / `idle` |
 | 记忆类型 | `memoryType`：`USER_PROFILE` / `FACT` / `PREFERENCE` |
+| 专家模式 | `expert` → 后端 `CoordinatorAgent`（Multi-Agent 协调者） |
 
 详细后端契约见 [docs/architecture.md](docs/architecture.md)。
 
@@ -59,15 +59,29 @@
 
 ```text
 src
-├── api/                         # 接口封装（request.ts 通用、agent.ts SSE、userMemory.ts 宠物记忆）
+├── api/                         # 接口封装（9 个文件）
+│   ├── request.ts               #   通用请求（axios 封装，credentials: 'include'）
+│   ├── agent.ts                 #   Agent SSE（fetch + getReader + TextDecoder）
+│   ├── userMemory.ts            #   宠物记忆
+│   ├── chat.ts                  #   会话与聊天历史
+│   ├── document.ts              #   文档上传与管理
+│   ├── hitl.ts                  #   HITL 审批
+│   ├── knowledge.ts             #   知识库
+│   ├── skill.ts                 #   Skill
+│   └── user.ts                  #   用户注册/登录
 ├── assets/                      # 全局样式
 ├── components/
-│   ├── knowledge/               # 知识库工作台
-│   └── pet/                     # 宠物记忆浮层（PetMemoryWidget.vue，797 行）
-├── constants/                   # Agent 模式、文档状态
+│   ├── knowledge/               # 知识库工作台（KnowledgeWorkspace.vue）
+│   └── pet/                     # 宠物记忆浮层（PetMemoryWidget.vue，803 行）
+│   ├── HelloWorld.vue           # Vite 脚手架遗留组件
+│   ├── TheWelcome.vue           # Vite 脚手架遗留组件
+│   ├── WelcomeItem.vue          # Vite 脚手架遗留组件
+│   └── icons/                   # Vite 脚手架遗留图标组件
+├── constants/                   # agent.ts（Agent 模式枚举）、document.ts（文档状态枚举）
+├── layouts/                     # BasicLayout.vue（空占位组件，当前未使用）
 ├── router/                      # 当前只有 / 和 /about
-├── stores/                      # Pinia 示例 store，非主链路
-├── types/                       # UserLongTermMemory、UserPetState、ChatMemoryHistory 等
+├── stores/                      # counter.ts（Pinia 示例 store，非主链路）
+├── types/                       # 类型定义（8 个文件：agent、chat、document、hitl、knowledge、skill、user、userMemory）
 └── views/
     ├── HomeView.vue             # 主业务入口（Agent 对话 + 知识库面板 + 宠物 FAB）
     └── AboutView.vue            # 脚手架示例页
@@ -76,7 +90,7 @@ src
 核心约定：
 
 - 路由：`/` 是真实业务首页，`/about` 是示例页
-- API 层：普通 JSON/Form 请求走 `src/api/request.ts`（带 `credentials: 'include'`），Agent SSE 走 `src/api/agent.ts`（`fetch + getReader + TextDecoder`），宠物记忆走 `src/api/userMemory.ts`
+- API 层：普通 JSON/Form 请求走 `src/api/request.ts`（带 `credentials: 'include'`），Agent SSE 走 `src/api/agent.ts`（`fetch + getReader + TextDecoder`），各业务模块有独立 API 文件（`chat.ts`、`document.ts`、`hitl.ts`、`knowledge.ts`、`skill.ts`、`user.ts`、`userMemory.ts`）
 - 状态：主链路状态主要在 `HomeView.vue`、`KnowledgeWorkspace.vue`、`PetMemoryWidget.vue` 本地，没有全局 Pinia store
 - 组件库：Ant Design Vue 已注册，但主界面主要是原生 HTML + 自定义 CSS
 - 组件边界：知识库逻辑留在 `KnowledgeWorkspace.vue`，宠物记忆逻辑留在 `PetMemoryWidget.vue`
@@ -96,7 +110,7 @@ src
 - 业务主入口是 `/` 的 `HomeView.vue`；`/about` 不是业务页面。详见 [docs/architecture.md](docs/architecture.md)。
 - 知识库工作台是首页内嵌面板，不是独立 `/knowledge` 路由。详见 [docs/architecture.md](docs/architecture.md)。
 - `PetMemoryWidget.vue` 已接入真实 `/userMemory/*` 接口，不是装饰组件。修改宠物记忆 UI 时注意后端 `memoryType` 枚举（USER_PROFILE/FACT/PREFERENCE）和前端 `memoryTypeLabelMap` 的同步。详见 [docs/architecture.md](docs/architecture.md)。
-- 当前首页只暴露 `fast` 和 `thinking`，`expert` 只保留在常量里。详见 [docs/design-docs/ref-frontend-architecture.md](docs/design-docs/ref-frontend-architecture.md)。
+- 首页暴露全部三种 Agent 模式（`fast` / `thinking` / `expert`），`expert` 模式描述为"多智能体协作，并行执行"，对应后端 `CoordinatorAgent`。详见 [docs/design-docs/ref-frontend-architecture.md](docs/design-docs/ref-frontend-architecture.md)。
 - 当前首页只做单 Skill 绑定；后端支持多 Skill 不代表前端 UI 已支持多选。详见 [docs/design-docs/ref-frontend-architecture.md](docs/design-docs/ref-frontend-architecture.md)。
 - Skill 绑定不会自动创建会话，知识库绑定会自动创建会话。详见 [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md)。
 - 知识库上传 UI 当前只允许 PDF；扩展格式必须同步 `cloud-cold-agent` 的 `DocumentReaderStrategy`。详见 [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md)。
@@ -112,7 +126,7 @@ src
 3. 启动前端：`npm run dev`。
 4. 打开 Vite 输出的本地地址，通常是 `http://localhost:5173`。
 5. 登录测试账号，确认 Cookie 正常携带。
-6. 验证普通接口、Agent SSE、知识库 PDF 上传、HITL 和宠物记忆浮层（点击右下角云朵图标）。
+6. 验证普通接口、Agent SSE、知识库 PDF 上传、HITL、Multi-Agent 模式（expert）和宠物记忆浮层（点击右下角云朵图标）。
 7. 提交前运行 `npm run type-check` 和 `npm run build`。
 
 curl 当前用户模板：

@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { AGENT_MODE_LABELS, AGENT_MODES, type AgentMode } from '@/constants/agent'
 import KnowledgeWorkspace from '@/components/knowledge/KnowledgeWorkspace.vue'
+import MultiAgentPanel from '@/components/agent/MultiAgentPanel.vue'
 import PetMemoryWidget from '@/components/pet/PetMemoryWidget.vue'
 import { callAgentStream, resumeAgentStream } from '@/api/agent'
 import {
@@ -23,6 +24,7 @@ import type {
   AgentFinalAnswerPayload,
   AgentHitlInterruptPayload,
   AgentKnowledgeRetrievalPayload,
+  AgentMultiAgentStepPayload,
   AgentStreamEvent,
   AgentThinkingStepPayload,
   PendingToolCall,
@@ -102,6 +104,22 @@ const thinkingPreviewRemainder = ref('')
 const thinkingPreviewTimerId = ref<number | null>(null)
 const agentRunStatus = ref<AgentRunStatus>('idle')
 const currentInterruptId = ref('')
+const showMultiAgentPanel = ref(false)
+const multiAgentPanelExpanded = ref(false)
+const multiAgentPanelRef = ref<{ handleEvent: (payload: AgentMultiAgentStepPayload) => void; reset: () => void } | null>(null)
+
+function toggleMultiAgentPanel() {
+  multiAgentPanelExpanded.value = !multiAgentPanelExpanded.value
+}
+
+function showMaToggle(message: ChatMessage): boolean {
+  return (
+    mode.value === AGENT_MODES.EXPERT &&
+    message.role === 'assistant' &&
+    message === messages.value[messages.value.length - 1] &&
+    showMultiAgentPanel.value
+  )
+}
 const showHitlModal = ref(false)
 const hitlToolCalls = ref<PendingToolCall[]>([])
 const hitlFeedbacks = ref<PendingToolCall[]>([])
@@ -178,185 +196,14 @@ const hoveredSkill = computed(() => {
   return skills.value.find((item) => item.name === name)
 })
 
-const orderedListPattern = /^\s*\d+\.\s+/
-const unorderedListPattern = /^\s*[-*+]\s+/
-const headingPattern = /^(#{1,6})\s+(.*)$/
-const fencePattern = /^```([\w-]*)\s*$/
-const quotePattern = /^\s*>\s?/
-const hrPattern = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/
+import { renderMarkdown } from '@/utils/markdown'
 
 function resolveSelectedSkills(conversation: ChatConversation | undefined): string[] {
-  if (!conversation) {
-    return []
-  }
+  if (!conversation) { return [] }
   if (Array.isArray(conversation.selectedSkillList) && conversation.selectedSkillList.length > 0) {
     return conversation.selectedSkillList
   }
   return []
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
-function sanitizeUrl(url: string): string {
-  const trimmed = url.trim()
-  if (!trimmed) {
-    return ''
-  }
-  if (/^(https?:|mailto:)/i.test(trimmed)) {
-    return trimmed
-  }
-  return ''
-}
-
-function renderMarkdownInline(source: string): string {
-  const placeholders: string[] = []
-  const store = (html: string) => {
-    const token = `@@MD_TOKEN_${placeholders.length}@@`
-    placeholders.push(html)
-    return token
-  }
-
-  let output = source
-
-  output = output.replace(/`([^`\n]+)`/g, (_, code: string) => store(`<code>${escapeHtml(code)}</code>`))
-  output = output.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, url: string) => {
-    const safeUrl = sanitizeUrl(url)
-    if (!safeUrl) {
-      return `${label} (${url})`
-    }
-    return store(
-      `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noreferrer noopener">${escapeHtml(label)}</a>`,
-    )
-  })
-
-  output = escapeHtml(output)
-  output = output.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-  output = output.replace(/__([^_]+)__/g, '<strong>$1</strong>')
-  output = output.replace(/~~([^~]+)~~/g, '<del>$1</del>')
-  output = output.replace(/(^|[^\w\\])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
-  output = output.replace(/(^|[^\w\\])_([^_\n]+)_(?!_)/g, '$1<em>$2</em>')
-
-  return output.replace(/@@MD_TOKEN_(\d+)@@/g, (_, index: string) => placeholders[Number(index)] ?? '')
-}
-
-function collectParagraph(lines: string[], start: number): { html: string; nextIndex: number } {
-  const buffer: string[] = []
-  let index = start
-
-  while (index < lines.length) {
-    const line = lines[index]
-    if (!line.trim()) {
-      break
-    }
-    if (
-      fencePattern.test(line) ||
-      headingPattern.test(line) ||
-      orderedListPattern.test(line) ||
-      unorderedListPattern.test(line) ||
-      quotePattern.test(line) ||
-      hrPattern.test(line)
-    ) {
-      break
-    }
-    buffer.push(line.trimEnd())
-    index += 1
-  }
-
-  const html = `<p>${buffer.map((line) => renderMarkdownInline(line)).join('<br />')}</p>`
-  return { html, nextIndex: index }
-}
-
-function renderMarkdown(source: string | undefined): string {
-  if (!source?.trim()) {
-    return ''
-  }
-
-  const lines = source.replace(/\r\n?/g, '\n').split('\n')
-  const blocks: string[] = []
-
-  let index = 0
-  while (index < lines.length) {
-    const line = lines[index]
-
-    if (!line.trim()) {
-      index += 1
-      continue
-    }
-
-    const fenceMatch = line.match(fencePattern)
-    if (fenceMatch) {
-      const language = fenceMatch[1]?.trim()
-      const codeLines: string[] = []
-      index += 1
-      while (index < lines.length && !/^```/.test(lines[index])) {
-        codeLines.push(lines[index])
-        index += 1
-      }
-      if (index < lines.length) {
-        index += 1
-      }
-      const languageClass = language ? ` class="language-${escapeHtml(language)}"` : ''
-      blocks.push(`<pre><code${languageClass}>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
-      continue
-    }
-
-    const headingMatch = line.match(headingPattern)
-    if (headingMatch) {
-      const level = Math.min(headingMatch[1].length, 6)
-      blocks.push(`<h${level}>${renderMarkdownInline(headingMatch[2].trim())}</h${level}>`)
-      index += 1
-      continue
-    }
-
-    if (hrPattern.test(line)) {
-      blocks.push('<hr />')
-      index += 1
-      continue
-    }
-
-    if (quotePattern.test(line)) {
-      const quoteLines: string[] = []
-      while (index < lines.length && quotePattern.test(lines[index])) {
-        quoteLines.push(lines[index].replace(quotePattern, ''))
-        index += 1
-      }
-      blocks.push(`<blockquote>${renderMarkdown(quoteLines.join('\n'))}</blockquote>`)
-      continue
-    }
-
-    if (unorderedListPattern.test(line)) {
-      const items: string[] = []
-      while (index < lines.length && unorderedListPattern.test(lines[index])) {
-        items.push(`<li>${renderMarkdownInline(lines[index].replace(unorderedListPattern, '').trim())}</li>`)
-        index += 1
-      }
-      blocks.push(`<ul>${items.join('')}</ul>`)
-      continue
-    }
-
-    if (orderedListPattern.test(line)) {
-      const items: string[] = []
-      while (index < lines.length && orderedListPattern.test(lines[index])) {
-        items.push(`<li>${renderMarkdownInline(lines[index].replace(orderedListPattern, '').trim())}</li>`)
-        index += 1
-      }
-      blocks.push(`<ol>${items.join('')}</ol>`)
-      continue
-    }
-
-    const paragraph = collectParagraph(lines, index)
-    blocks.push(paragraph.html)
-    index = paragraph.nextIndex
-  }
-
-  return blocks.join('')
 }
 
 function scrollToBottom() {
@@ -1331,6 +1178,13 @@ function handleAgentEvent(event: AgentStreamEvent, assistantMessage: ChatMessage
       scrollToBottom()
       break
     }
+    case 'multi_agent': {
+      const payload = eventData as AgentMultiAgentStepPayload
+      showMultiAgentPanel.value = true
+      multiAgentPanelRef.value?.handleEvent(payload)
+      scrollToBottom()
+      break
+    }
     case 'error': {
       const payload = eventData as AgentErrorPayload
       const message = payload.message || '调用失败'
@@ -1529,6 +1383,13 @@ async function submitQuestion() {
   loading.value = true
   agentRunStatus.value = 'calling'
   controller.value = new AbortController()
+
+  // 专家模式：重置多智能体面板
+  showMultiAgentPanel.value = mode.value === AGENT_MODES.EXPERT
+  multiAgentPanelExpanded.value = false
+  if (showMultiAgentPanel.value) {
+    multiAgentPanelRef.value?.reset()
+  }
 
   try {
     await callAgentStream(
@@ -1855,6 +1716,14 @@ onBeforeUnmount(() => {
               class="message-row"
               :class="message.role"
             >
+              <button
+                v-if="showMaToggle(message)"
+                class="ma-inline-toggle"
+                type="button"
+                @click="toggleMultiAgentPanel"
+              >
+                {{ multiAgentPanelExpanded ? '收起' : '详情展开' }}
+              </button>
               <div class="message-bubble">
                 <p class="role-tag">{{ message.role === 'user' ? '你' : '助手' }}</p>
                 <template v-if="message.role === 'assistant'">
@@ -1917,6 +1786,13 @@ onBeforeUnmount(() => {
                 <p v-if="message.pending" class="typing">正在生成...</p>
               </div>
             </article>
+            <MultiAgentPanel
+              v-if="showMultiAgentPanel"
+              ref="multiAgentPanelRef"
+              :visible="showMultiAgentPanel"
+              :expanded="multiAgentPanelExpanded"
+              @close="multiAgentPanelExpanded = false"
+            />
           </template>
 
           <template v-else>
@@ -2681,6 +2557,7 @@ onBeforeUnmount(() => {
 .message-row {
   display: flex;
   margin-bottom: 0.85rem;
+  position: relative;
 }
 
 .message-row.user {
@@ -2704,6 +2581,26 @@ onBeforeUnmount(() => {
   background: #f7f7f8;
   border-color: #d8d8dc;
   color: #222;
+}
+
+.ma-inline-toggle {
+  position: absolute;
+  right: calc(100% + 8px);
+  top: 1.5rem;
+  padding: 4px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #fff;
+  font-size: 12px;
+  color: #1677ff;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.ma-inline-toggle:hover {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1);
 }
 
 .role-tag {

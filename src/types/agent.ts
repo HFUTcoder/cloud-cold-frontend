@@ -28,6 +28,7 @@ export type AgentEventType =
   | 'final_answer'
   | 'hitl_interrupt'
   | 'knowledge_retrieval'
+  | 'multi_agent'
   | 'error'
 
 export interface AgentThinkingStepPayload {
@@ -75,6 +76,21 @@ export interface AgentErrorPayload {
   detail?: string
 }
 
+/**
+ * 多智能体协作事件。
+ * event: plan | worker_start | worker_delta | worker_result
+ */
+export interface AgentMultiAgentStepPayload {
+  event?: string
+  workerId?: string
+  taskId?: string
+  description?: string
+  content?: string
+  summary?: string
+  success?: boolean
+  planData?: string
+}
+
 export interface AgentStreamEvent {
   type: AgentEventType | string
   conversationId?: string
@@ -84,6 +100,7 @@ export interface AgentStreamEvent {
     | AgentHitlInterruptPayload
     | AgentFinalAnswerPayload
     | AgentKnowledgeRetrievalPayload
+    | AgentMultiAgentStepPayload
     | AgentErrorPayload
 }
 
