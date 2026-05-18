@@ -60,7 +60,7 @@
 ```text
 src
 ├── api/                         # 接口封装（9 个文件）
-│   ├── request.ts               #   通用请求（axios 封装，credentials: 'include'）
+│   ├── request.ts               #   通用请求（fetch 封装，credentials: 'include'）
 │   ├── agent.ts                 #   Agent SSE（fetch + getReader + TextDecoder）
 │   ├── userMemory.ts            #   宠物记忆
 │   ├── chat.ts                  #   会话与聊天历史
@@ -71,6 +71,7 @@ src
 │   └── user.ts                  #   用户注册/登录
 ├── assets/                      # 全局样式
 ├── components/
+│   ├── agent/                   # 专家模式 Multi-Agent 面板（MultiAgentPanel.vue）
 │   ├── knowledge/               # 知识库工作台（KnowledgeWorkspace.vue）
 │   └── pet/                     # 宠物记忆浮层（PetMemoryWidget.vue，803 行）
 │   ├── HelloWorld.vue           # Vite 脚手架遗留组件
@@ -82,6 +83,7 @@ src
 ├── router/                      # 当前只有 / 和 /about
 ├── stores/                      # counter.ts（Pinia 示例 store，非主链路）
 ├── types/                       # 类型定义（8 个文件：agent、chat、document、hitl、knowledge、skill、user、userMemory）
+├── utils/                       # markdown.ts（自定义 Markdown-to-HTML 渲染器）
 └── views/
     ├── HomeView.vue             # 主业务入口（Agent 对话 + 知识库面板 + 宠物 FAB）
     └── AboutView.vue            # 脚手架示例页
@@ -93,7 +95,7 @@ src
 - API 层：普通 JSON/Form 请求走 `src/api/request.ts`（带 `credentials: 'include'`），Agent SSE 走 `src/api/agent.ts`（`fetch + getReader + TextDecoder`），各业务模块有独立 API 文件（`chat.ts`、`document.ts`、`hitl.ts`、`knowledge.ts`、`skill.ts`、`user.ts`、`userMemory.ts`）
 - 状态：主链路状态主要在 `HomeView.vue`、`KnowledgeWorkspace.vue`、`PetMemoryWidget.vue` 本地，没有全局 Pinia store
 - 组件库：Ant Design Vue 已注册，但主界面主要是原生 HTML + 自定义 CSS
-- 组件边界：知识库逻辑留在 `KnowledgeWorkspace.vue`，宠物记忆逻辑留在 `PetMemoryWidget.vue`
+- 组件边界：知识库逻辑留在 `KnowledgeWorkspace.vue`，宠物记忆逻辑留在 `PetMemoryWidget.vue`，Multi-Agent 面板逻辑留在 `MultiAgentPanel.vue`
 
 宠物记忆组件要点：
 
@@ -102,6 +104,13 @@ src
 - 面板展示：宠物名称（可改名）、记忆统计、主动学习按钮、记忆高亮、最近长期记忆列表（最多 8 条）、删除记忆
 - 宠物情绪通过 CSS class 驱动动画：`learning`（pulse）、`updated`（saturate）、`idle`（默认）
 - 未登录时点击 FAB 触发 `request-login` 事件
+
+Multi-Agent 面板要点：
+
+- `MultiAgentPanel.vue`：专家模式下展示多智能体协作工作流，可拖拽浮层
+- 面板位置通过 `localStorage` 键 `cloud-cold-ma-panel-position` 持久化
+- 展示 Worker 执行状态（running/completed/failed）和可展开的输出内容
+- 仅在 `expert` 模式下显示，随 Chat 消息流式更新 Worker 进度
 
 详细说明见 [docs/architecture.md](docs/architecture.md) 和 [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md)。
 
@@ -112,7 +121,7 @@ src
 - `PetMemoryWidget.vue` 已接入真实 `/userMemory/*` 接口，不是装饰组件。修改宠物记忆 UI 时注意后端 `memoryType` 枚举（USER_PROFILE/FACT/PREFERENCE）和前端 `memoryTypeLabelMap` 的同步。详见 [docs/architecture.md](docs/architecture.md)。
 - 首页暴露全部三种 Agent 模式（`fast` / `thinking` / `expert`），`expert` 模式描述为"多智能体协作，并行执行"，对应后端 `CoordinatorAgent`。详见 [docs/design-docs/ref-frontend-architecture.md](docs/design-docs/ref-frontend-architecture.md)。
 - 当前首页只做单 Skill 绑定；后端支持多 Skill 不代表前端 UI 已支持多选。详见 [docs/design-docs/ref-frontend-architecture.md](docs/design-docs/ref-frontend-architecture.md)。
-- Skill 绑定不会自动创建会话，知识库绑定会自动创建会话。详见 [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md)。
+- Skill 绑定和知识库绑定在当前无活跃会话时均会自动创建会话。详见 [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md)。
 - 知识库上传 UI 当前只允许 PDF；扩展格式必须同步 `cloud-cold-agent` 的 `DocumentReaderStrategy`。详见 [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md)。
 - 普通 JSON / Form 请求必须走 `src/api/request.ts`，且需要登录态的请求必须保留 `credentials: 'include'`。详见 [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md)。
 - Agent 流式接口是 `fetch + getReader + TextDecoder` 手动解析，不要直接替换成 `EventSource`。详见 [docs/design-docs/frontend-patterns.md](docs/design-docs/frontend-patterns.md)。
